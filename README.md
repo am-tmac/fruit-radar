@@ -5,6 +5,7 @@
 > 与原版的差异（2026-09-13 起）：
 > - 应用名、窗口标题与托盘提示改为「水果雷达」，Bundle ID 改为 `com.amtmac.fruitradar`
 > - 修复监控列表在窄窗口下「最后检查 / Bark / 删除」三列被裁掉、无法删除监控的布局问题：内容宽度上限 1180→1360px、收紧门店与型号列宽、滚动区补上横向滚动条、窗口默认尺寸 1360×900、最小 1200×700
+> - 自绘应用图标（水果 + 雷达），矢量源在 `assets/app-icon.svg`，改动后跑 `pnpm tauri icon assets/app-icon.svg` 重新生成整套
 > - 关闭更新产物签名（`createUpdaterArtifacts: false`），更新端点指向本仓库
 >
 > 依据 GPL-3.0-or-later 发布，原始版权与许可声明（`LICENSE`、`NOTICE`）保留不变。
