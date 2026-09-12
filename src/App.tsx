@@ -346,7 +346,7 @@ export default function App() {
   return (
     <TooltipProvider delayDuration={180}>
       <div className="app-canvas min-h-screen text-foreground">
-        <main className="mx-auto flex min-h-screen w-full max-w-[1180px] flex-col gap-4 px-5 py-5 lg:h-screen lg:overflow-hidden">
+        <main className="mx-auto flex min-h-screen w-full max-w-[1360px] flex-col gap-4 px-5 py-5 lg:h-screen lg:overflow-hidden">
           <header className="surface-panel flex shrink-0 items-center justify-between gap-5 px-5 py-4">
             <div className="flex min-w-0 items-center gap-3.5">
               <div className="brand-mark" aria-hidden="true">
@@ -355,7 +355,7 @@ export default function App() {
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <h1 className="truncate text-lg font-semibold tracking-[-0.02em]">
-                    果到雷达
+                    水果雷达
                   </h1>
                   <Badge variant="outline" className="hidden border-primary/20 bg-primary/8 text-primary sm:inline-flex">
                     LIVE
@@ -628,8 +628,8 @@ export default function App() {
                         sortedRows.map((row) => (
                           <TableRow key={targetKey(row.target)} className="group h-14 hover:bg-muted/22">
                             <TableCell className="px-4"><StatusBadge availability={row.availability} pickupDetails={row.pickupDetails} /></TableCell>
-                            <TableCell className="px-3 font-medium">{row.target.storeTitle}</TableCell>
-                            <TableCell className="max-w-[24rem] truncate px-3 text-muted-foreground" title={row.target.productName}>
+                            <TableCell className="max-w-[9rem] truncate px-3 font-medium" title={row.target.storeTitle}>{row.target.storeTitle}</TableCell>
+                            <TableCell className="max-w-[15rem] truncate px-3 text-muted-foreground" title={row.target.productName}>
                               <button
                                 className="text-left hover:text-primary hover:underline"
                                 aria-label={`打开商品页：${row.target.productName}`}

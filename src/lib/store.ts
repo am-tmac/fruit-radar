@@ -479,7 +479,7 @@ export function dismissUpdate(): void {
 /** 自动更新不可用时，打开本项目的完整安装包下载页。 */
 export async function openReleasePage(): Promise<void> {
   try {
-    await openUrl("https://github.com/suversal/apple-store-inventory-monitor/releases/latest");
+    await openUrl("https://github.com/am-tmac/fruit-radar/releases/latest");
   } catch (err) {
     update({ updateError: `无法打开下载页：${String(err)}` });
   }
