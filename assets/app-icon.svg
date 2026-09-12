@@ -16,7 +16,7 @@
     <mask id="fruitHole">
       <rect x="0" y="0" width="1024" height="1024" fill="#fff"/>
       <circle cx="512" cy="512" r="191" fill="#000"/>
-      <path d="M 485 323 C 528 268 604 228 690 238 C 668 300 612 352 556 372 Z" fill="#000"/>
+      <path d="M 486 322 C 530 264 606 226 686 236 C 664 292 618 336 560 364 Z" fill="#000"/>
     </mask>
   </defs>
 
