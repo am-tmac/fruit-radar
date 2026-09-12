@@ -1,68 +1,29 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0.2" y2="1">
-      <stop offset="0" stop-color="#20345c"/>
-      <stop offset="0.55" stop-color="#0d1729"/>
-      <stop offset="1" stop-color="#05080f"/>
-    </linearGradient>
-    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.16"/>
-      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
-    </linearGradient>
-    <radialGradient id="halo" cx="0.5" cy="0.5" r="0.5">
-      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.30"/>
-      <stop offset="0.65" stop-color="#0ea5e9" stop-opacity="0.08"/>
-      <stop offset="1" stop-color="#0ea5e9" stop-opacity="0"/>
-    </radialGradient>
-    <linearGradient id="fruit" x1="0.25" y1="0.05" x2="0.8" y2="1">
-      <stop offset="0" stop-color="#ffa273"/>
-      <stop offset="0.5" stop-color="#f4573c"/>
-      <stop offset="1" stop-color="#c62a41"/>
-    </linearGradient>
-    <linearGradient id="leaf" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#8df0b0"/>
-      <stop offset="1" stop-color="#1f9c53"/>
-    </linearGradient>
-    <linearGradient id="ray" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#67e8f9" stop-opacity="0.9"/>
-      <stop offset="1" stop-color="#67e8f9" stop-opacity="0"/>
+    <linearGradient id="teal" x1="0.15" y1="0" x2="0.85" y2="1">
+      <stop offset="0" stop-color="#3ad1c0"/>
+      <stop offset="0.5" stop-color="#24c4b3"/>
+      <stop offset="1" stop-color="#1bb2a4"/>
     </linearGradient>
     <clipPath id="squircle"><rect x="100" y="100" width="824" height="824" rx="188"/></clipPath>
-    <filter id="drop" x="-25%" y="-25%" width="150%" height="150%">
-      <feDropShadow dx="0" dy="14" stdDeviation="20" flood-color="#000000" flood-opacity="0.45"/>
+    <filter id="appsh" x="-25%" y="-25%" width="150%" height="150%">
+      <feDropShadow dx="0" dy="14" stdDeviation="20" flood-color="#000" flood-opacity="0.40"/>
     </filter>
+    <filter id="marksh" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="3" dy="12" stdDeviation="14" flood-color="#0b3b38" flood-opacity="0.18"/>
+    </filter>
+    <!-- 白=保留 黑=挖空：果身圆 + 叶片，两者相交处自然留下「果梗」 -->
+    <mask id="fruitHole">
+      <rect x="0" y="0" width="1024" height="1024" fill="#fff"/>
+      <circle cx="512" cy="512" r="191" fill="#000"/>
+      <path d="M 485 323 C 528 268 604 228 690 238 C 668 300 612 352 556 372 Z" fill="#000"/>
+    </mask>
   </defs>
 
-  <rect x="100" y="100" width="824" height="824" rx="188" fill="#05080f" filter="url(#drop)"/>
+  <rect x="100" y="100" width="824" height="824" rx="188" fill="#000" filter="url(#appsh)"/>
+  <rect x="100" y="100" width="824" height="824" rx="188" fill="#ffffff"/>
 
   <g clip-path="url(#squircle)">
-    <rect x="100" y="100" width="824" height="824" fill="url(#bg)"/>
-    <rect x="100" y="100" width="824" height="430" fill="url(#sheen)"/>
-    <circle cx="512" cy="556" r="368" fill="url(#halo)"/>
-
-    <!-- 雷达圈：加粗提高小尺寸辨识度 -->
-    <g fill="none" stroke="#38bdf8">
-      <circle cx="512" cy="556" r="300" stroke-width="16" stroke-opacity="0.30"/>
-      <circle cx="512" cy="556" r="228" stroke-width="16" stroke-opacity="0.42"/>
-      <circle cx="512" cy="556" r="158" stroke-width="18" stroke-opacity="0.55"/>
-    </g>
-    <!-- 十字准线 -->
-    <g stroke="#7dd3fc" stroke-opacity="0.20" stroke-width="8">
-      <line x1="512" y1="196" x2="512" y2="908"/>
-      <line x1="160" y1="556" x2="864" y2="556"/>
-    </g>
-    <!-- 扫描扇形 + 前沿 -->
-    <path d="M512 556 L252 274 A396 396 0 0 1 512 160 Z" fill="url(#ray)" opacity="0.62"/>
-    <line x1="512" y1="556" x2="214" y2="308" stroke="#bcf0fb" stroke-width="20" stroke-linecap="round" opacity="0.95"/>
-
-    <!-- 水果 -->
-    <g>
-      <ellipse cx="512" cy="700" rx="146" ry="26" fill="#000" opacity="0.22"/>
-      <circle cx="512" cy="556" r="130" fill="url(#fruit)"/>
-      <ellipse cx="478" cy="506" rx="46" ry="34" fill="#ffffff" opacity="0.24" transform="rotate(-28 478 506)"/>
-      <path d="M509 430 C512 402 519 388 531 377" stroke="#7a5230" stroke-width="18" stroke-linecap="round" fill="none"/>
-      <path d="M534 388 C558 336 630 322 656 337 C647 388 594 424 534 388 Z" fill="url(#leaf)"/>
-      <path d="M548 381 C578 363 611 349 644 342" stroke="#12803f" stroke-width="6" fill="none" opacity="0.55" stroke-linecap="round"/>
-    </g>
+    <circle cx="512" cy="512" r="344" fill="url(#teal)" mask="url(#fruitHole)" filter="url(#marksh)"/>
   </g>
 </svg>
