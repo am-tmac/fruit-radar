@@ -1,6 +1,6 @@
 # 水果雷达（Fruit Radar）
 
-当前分支版本：**1.0.2**（手动开始 + 独立临时查询 profile 修正版）。版本号独立于上游；下方历史截图及上游安装说明不代表本分支已发布安装包。
+当前分支版本：**1.0.5**（手动开始 + 独立临时查询 profile 修正版）。版本号独立于上游；下方历史截图及上游安装说明不代表本分支已发布安装包。
 
 > **这是 [suversal/apple-store-inventory-monitor](https://github.com/suversal/apple-store-inventory-monitor)（果到雷达 v1.0.4）的修改分支，由 am-tmac 维护，不是上游官方版本。**
 >
@@ -17,7 +17,7 @@
 
 果到雷达是一款 Apple 直营店取货库存监控工具。选好地区、门店和具体型号后，它会定时检查库存；检测到有货时，可以播放提示音、推送 Bark，并按你的选择打开 Apple 购物袋或商品详情。
 
-上游支持 macOS、Windows 和 Linux，使用 Rust、Tauri 2 和 React 编写。本 README 对应水果雷达 **1.0.2** 源码；上游英文应用名为 **Apple Store Inventory Monitor**，仓库名为 `apple-store-inventory-monitor`。
+上游支持 macOS、Windows 和 Linux，使用 Rust、Tauri 2 和 React 编写。本 README 对应水果雷达 **1.0.5** 源码；上游英文应用名为 **Apple Store Inventory Monitor**，仓库名为 `apple-store-inventory-monitor`。
 
 基于 [ENCHIGO/apple-pickup-watcher v0.3.2](https://github.com/ENCHIGO/apple-pickup-watcher/tree/v0.3.2) 继续开发，按 GPL-3.0-or-later 发布。来源与修改记录见 [NOTICE](NOTICE)。
 
@@ -83,7 +83,7 @@ codesign --verify --deep --strict target/release/bundle/macos/水果雷达.app
 
 ## 安装
 
-以下为上游安装说明及历史版本记录。本分支 1.0.2 当前仅准备源码与本地 macOS 构建包，未据此发布 Release；不要把上游 1.0.2 的签名问题等同于本分支。
+以下为上游安装说明及历史版本记录。本分支 1.0.5 当前仅准备源码与本地 macOS 构建包，未据此发布 Release；不要把上游历史版本的签名问题等同于本分支。
 
 打开 [最新正式版本](https://github.com/suversal/apple-store-inventory-monitor/releases/latest)，在 **Assets** 中下载对应系统的安装包。每个版本的变化见 [更新记录](CHANGELOG.md)。
 
@@ -594,7 +594,7 @@ pnpm tauri build --no-sign
 
 产物位于 `target/release/bundle/`。自动更新包需要仓库维护者配置 `TAURI_SIGNING_PRIVATE_KEY`；私钥设置了密码时还要配置 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。没有私钥时不能生成可被现有客户端验证的更新签名。
 
-正式版本由 [Release 工作流](.github/workflows/release.yml) 构建，当前分支的标签格式为 `v1.0.2`（准备源码不等于创建标签或发布 Release）。发版前应确认 `package.json`、工作区 `Cargo.toml`、`src-tauri/tauri.conf.json` 与标签的版本一致。macOS 专用配置在 `src-tauri/tauri.macos.conf.json` 中启用 ad-hoc 签名；发布流水线会同时验证自动更新归档和 DMG 内的应用签名。
+正式版本由 [Release 工作流](.github/workflows/release.yml) 构建，当前分支的标签格式为 `v1.0.5`（准备源码不等于创建标签或发布 Release）。发版前应确认 `package.json`、工作区 `Cargo.toml`、`src-tauri/tauri.conf.json` 与标签的版本一致。macOS 专用配置在 `src-tauri/tauri.macos.conf.json` 中启用 ad-hoc 签名；发布流水线会同时验证自动更新归档和 DMG 内的应用签名。
 
 推送 `v*` 标签后，GitHub Actions 会生成 macOS、Windows 和 Linux 安装包，并先创建草稿 Release；确认四个平台全部成功后再公开发布，避免用户下载到缺少部分平台或 `latest.json` 尚未完整生成的版本。手动运行 `workflow_dispatch` 只生成 Actions 构建产物，不会创建公开 Release。
 
