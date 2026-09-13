@@ -2,6 +2,28 @@
 /target/
 **/*.rs.bk
 
+# Local build evidence, packages and signing material
+/build-evidence/
+Build*/
+DerivedData/
+.build/
+*.xcresult
+*.ipa
+*.dSYM/
+*.app/
+*.zip
+*.dmg
+*.app.tar.gz
+*.p12
+*.pfx
+*.mobileprovision
+*.pem
+.env
+.env.*
+settings.v2.json
+activity*.jsonl
+Logs/
+
 # 前端
 node_modules
 /dist

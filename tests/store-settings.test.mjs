@@ -9,7 +9,7 @@ registerHooks({
   resolve(specifier, context, nextResolve) {
     const stubs = {
       "@tauri-apps/api/core": "export const invoke = (...args) => globalThis.__settingsTestInvoke(...args);",
-      "@tauri-apps/api/event": "export const listen = async () => () => {};",
+      "@tauri-apps/api/event": "export const listen = async (channel, cb) => { globalThis.__listeners ??= {}; globalThis.__listeners[channel] = cb; return () => {}; };",
       "@tauri-apps/plugin-opener": "export const openUrl = async () => {};",
     };
     if (specifier in stubs) {
@@ -26,6 +26,8 @@ const defaults = {
   locale: "zh_CN", targets: [], intervalSeconds: 30,
   barkUrl: "https://example.invalid/old", soundEnabled: true, openOnHit: "bag",
   productBarkUrls: {},
+  autoAddToBag: false, bagApplecare: false,
+  pickupLastName: "", pickupFirstName: "", pickupEmail: "", pickupPhone: "", pickupIdLast4: "",
 };
 let generation = 0;
 async function setup() {
@@ -34,7 +36,15 @@ async function setup() {
   let release;
   let blockNext = false;
   const calls = [];
+  const logWrites = [];
   invoke = async (command, args) => {
+    // 活动日志落盘是旁路：即发即忘，不参与这里的时序断言。若把它算进 calls，
+    // 任何一次 pushLog 都会让别的用例变红；断言真正要盯的是「设置写入」与
+    // 「动作」谁先谁后。它自己有没有被调用，由专门的用例盯着。
+    if (command === "append_activity_log") {
+      logWrites.push(args?.lines ?? []);
+      return;
+    }
     calls.push(command);
     if (blockNext) {
       blockNext = false;
@@ -50,12 +60,45 @@ async function setup() {
   await store.saveSettings(defaults);
   calls.length = 0;
   return {
-    store, calls, persisted: () => persisted,
+    store, calls, logWrites, persisted: () => persisted,
     block: () => { blockNext = true; },
     release: () => release(),
   };
 }
 const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+test("connect does not overwrite events with stale IPC snapshots", async () => {
+  const { store } = await setup();
+  let release;
+  invoke = async (command) => {
+    if (command === "get_snapshot") return new Promise(resolve => { release = () => resolve([]); });
+    if (command === "is_running") return false;
+    if (command === "get_settings") return defaults;
+    return [];
+  };
+  const connecting = store.connect();
+  await tick();
+  globalThis.__listeners["watcher://event"]({ payload: { type: "runStateChanged", running: true } });
+  release();
+  await connecting;
+  assert.equal(store.watcherStore.getSnapshot().running, true);
+});
+
+test("connect with saved targets stays stopped until explicit manual start", async () => {
+  const { store } = await setup();
+  const calls = [];
+  invoke = async (command) => {
+    calls.push(command);
+    if (command === "get_settings") return { ...defaults, targets: [{ locale: "zh_CN", storeNumber: "R390", partNumber: "TEST/A", storeTitle: "Offline", productName: "Offline" }] };
+    if (command === "is_running") return false;
+    return [];
+  };
+  await store.connect();
+  assert.equal(store.watcherStore.getSnapshot().ready, true);
+  assert.equal(store.watcherStore.getSnapshot().running, false);
+  assert.equal(calls.includes("start_watching"), false);
+  assert.equal(calls.includes("refresh_products"), false);
+});
 
 test("overlapping edits merge with the last saved settings", async () => {
   const ctx = await setup();
@@ -129,4 +172,17 @@ test("a product-specific Bark URL can be set and cleared", async () => {
 
   assert.equal(await ctx.store.setProductBarkUrl(target, ""), true);
   assert.deepEqual(ctx.persisted().productBarkUrls, {});
+});
+
+test("activity log lines are also written to disk, timestamped", async () => {
+  const ctx = await setup();
+  await ctx.store.testNotify();
+  assert.ok(ctx.logWrites.length >= 1, "每次 pushLog 都应顺带落盘一份");
+  const lines = ctx.logWrites.flat();
+  assert.ok(lines.length >= 1, "落盘的应当是具体日志行，而不是空批次");
+  // 界面那份带 [HH:MM:SS] 前缀，落盘的必须是同一串 —— 事后对照时才发现得了
+  // 「这条告警发生在几点」。少了时间戳，日志就退化成一份没用的清单。
+  for (const line of lines) {
+    assert.match(line, /^\[\d{2}:\d{2}:\d{2}\] \S/, `日志行缺少时间戳：${line}`);
+  }
 });

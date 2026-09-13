@@ -18,10 +18,12 @@
 //! `Availability` 没有 `Default`、[`apple::ApiError`] 到状态的转换是全覆盖且单向的，
 //! 「把失败悄悄当成无货」在类型层面就写不出来。
 
+pub mod activity_log;
 pub mod apple;
 pub mod apple_catalog;
 pub mod catalog;
 pub mod config;
 pub mod model;
 pub mod notify;
+pub mod resume;
 pub mod watcher;

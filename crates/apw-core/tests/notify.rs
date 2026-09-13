@@ -20,6 +20,13 @@ use apw_core::notify::{Bark, Multi, Notification, Notifier, NotifyError, Sound};
 ///
 /// 必须看**原始**请求行而不是解析后的结果：这一组测试要证明的正是「转义对不对」，
 /// 一旦在断言之前先解码一次，斜杠有没有变成 %2F 就看不出来了。
+#[tokio::test]
+async fn transport_error_does_not_include_device_key() {
+    let bark = Bark::new("http://127.0.0.1:1/private-device-key".into(), reqwest::Client::new());
+    let err = bark.notify(&Notification::new("title", "body")).await.unwrap_err();
+    assert!(!err.to_string().contains("private-device-key"));
+}
+
 struct TestServer {
     addr: SocketAddr,
     requests: Arc<Mutex<Vec<String>>>,

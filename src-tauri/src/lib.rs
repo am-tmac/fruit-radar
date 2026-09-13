@@ -9,7 +9,7 @@
 //! 系统节流甚至挂起，把「及时提醒」挂在一个会被挂起的执行环境上是不能接受的。
 
 use std::sync::RwLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use apw_core::catalog::Catalog;
 use apw_core::config::{MIN_INTERVAL_SECONDS, OpenOnHit, Settings, SettingsStore};
@@ -22,6 +22,8 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use tauri_plugin_updater::UpdaterExt;
 
+mod automation;
+mod bag;
 mod chromium_fetcher;
 use chromium_fetcher::AppleChromiumFetcher;
 
@@ -54,12 +56,21 @@ struct CategoryDto {
 
 struct AppState {
     watcher: Watcher,
+    control: tokio::sync::Mutex<()>,
+    admission: std::sync::Mutex<automation::Admission>,
+    order_watch: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    orders: std::sync::Mutex<std::collections::HashSet<String>>,
     catalog: Catalog,
     http: reqwest::Client,
     /// 设置的内存副本。写盘失败不该让界面卡住，所以内存副本是权威的展示来源。
     settings: RwLock<Settings>,
     /// 为 `None` 表示配置不可持久化（目录不可写，或上次读取失败已放弃写盘）。
     store: Option<SettingsStore>,
+    /// 可见的买家浏览器会话。`None` 表示还没打开过。
+    ///
+    /// 放在状态里而不是每次现开：购物袋是按这个窗口的 cookie 记的，
+    /// 窗口一旦被换掉，之前加进去的东西就找不回来了。
+    bag: tokio::sync::Mutex<Option<bag::BagSession>>,
 }
 
 impl AppState {
@@ -112,6 +123,23 @@ fn list_stores(state: tauri::State<'_, AppState>, locale: String) -> Result<Vec<
     state.catalog.stores(&locale).map_err(|e| e.to_string())
 }
 
+/// 活动日志落盘用的文件名。
+const ACTIVITY_LOG_FILE: &str = "activity.log";
+
+/// 把界面上的活动日志追加到磁盘。
+///
+/// 界面那份只活在内存里，应用一关就没了。用户问「刚才那个 541 是什么时候出现的」
+/// 时，没有落盘就只能靠回忆 —— 而这类问题恰恰最需要时间点。
+#[tauri::command]
+fn append_activity_log(lines: Vec<String>) {
+    let Ok(dir) = apw_core::config::app_dir() else {
+        return;
+    };
+    // 写不进去就算了：日志不该有机会干扰监控本身。具体滚动策略见
+    // apw_core::activity_log，那里有单测盯着。
+    let _ = apw_core::activity_log::append(&dir.join(ACTIVITY_LOG_FILE), &lines);
+}
+
 #[tauri::command]
 fn list_products(
     state: tauri::State<'_, AppState>,
@@ -148,6 +176,8 @@ async fn save_settings(
     state: tauri::State<'_, AppState>,
     settings: Settings,
 ) -> Result<Settings, String> {
+    let _control = state.control.lock().await;
+    state.admission.lock().unwrap().cancel();
     let mut next = settings;
     next.normalize();
 
@@ -169,6 +199,8 @@ async fn set_targets(
     state: tauri::State<'_, AppState>,
     targets: Vec<Target>,
 ) -> Result<Vec<TargetState>, String> {
+    let _control = state.control.lock().await;
+    state.admission.lock().unwrap().cancel();
     let mut next = state.settings_snapshot();
     next.targets = targets;
     next.normalize();
@@ -179,6 +211,7 @@ async fn set_targets(
 
 #[tauri::command]
 async fn set_interval(state: tauri::State<'_, AppState>, seconds: u64) -> Result<u64, String> {
+    let _control = state.control.lock().await;
     let secs = seconds.max(MIN_INTERVAL_SECONDS);
     state.watcher.set_interval(Duration::from_secs(secs)).await;
     let mut next = state.settings_snapshot();
@@ -189,14 +222,27 @@ async fn set_interval(state: tauri::State<'_, AppState>, seconds: u64) -> Result
 
 #[tauri::command]
 async fn start_watching(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let _control = state.control.lock().await;
     state.watcher.start().await;
+    remember_running(state.watcher.is_running().await);
     Ok(())
 }
 
 #[tauri::command]
 async fn stop_watching(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let _control = state.control.lock().await;
+    state.admission.lock().unwrap().cancel();
     state.watcher.stop().await;
+    remember_running(state.watcher.is_running().await);
     Ok(())
+}
+
+/// 保留已有运行状态记录兼容性；启动不再读取它，始终等待用户手动开始。
+/// 写入失败不影响启停命令。
+fn remember_running(running: bool) {
+    if let Ok(path) = apw_core::config::resume_state_path() {
+        let _ = apw_core::resume::write(&path, running);
+    }
 }
 
 #[tauri::command]
@@ -341,6 +387,258 @@ fn open_target_product(app: AppHandle, target: Target) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// 买家浏览器（自动加购用）的持久数据目录名。
+///
+/// 和库存查询的一次性临时目录刻意分开：查询会话随时可以丢，而这个目录
+/// 装着用户的登录态和购物袋，必须长期保留。
+const BUYER_PROFILE_DIR: &str = "chrome-buyer";
+
+/// 在买家窗口里完成一次加购全流程。
+async fn add_target_to_bag(app: &AppHandle, target: &Target, ticket: Option<automation::Ticket>) -> Result<bag::BagOutcome, String> {
+    let region = region_by_locale(&target.locale).ok_or("无法识别目标地区")?;
+    let product_url = target_purchase_url(app, target).ok_or("无法生成该商品的购买页地址")?;
+    let bag_url = region.bag_url();
+    let profile = apw_core::config::runtime_dir(BUYER_PROFILE_DIR).map_err(|e| e.to_string())?;
+
+    let state = app.state::<AppState>();
+    let mut guard = state.bag.lock().await;
+    let settings = state.settings_snapshot();
+    if let Some(ticket) = &ticket {
+        if !state.admission.lock().unwrap().valid(ticket)
+            || !settings.auto_add_to_bag
+            || !settings.targets.iter().any(|t| t.locale == target.locale && t.part_number == target.part_number && t.store_number == target.store_number)
+            || !state.watcher.is_running().await {
+            return Err("自动加购任务已取消或过期".into());
+        }
+    }
+    if guard.is_none() {
+        *guard = Some(bag::BagSession::start_visible(&profile).await?);
+    }
+    bag::ensure_no_checkout_pages(&profile).await?;
+    let session = guard.as_mut().ok_or("买家窗口不可用")?;
+    // Never navigate a checkout/order page, including manual retries.
+    if !automation::safe_to_navigate(&session.current_url().await?) {
+        return Err("买家窗口已进入结账或订单页面；请手动操作".into());
+    }
+    // Serialize the final running/settings check with pause and settings writes.
+    // No await between commit and the first Page.navigate poll; once committed,
+    // cancellation or an uncertain CDP result must continue to deduplicate.
+    let control = state.control.lock().await;
+    let settings = state.settings_snapshot();
+    if let Some(ticket) = &ticket {
+        if !settings.auto_add_to_bag
+            || !settings.targets.iter().any(|t| t.locale == target.locale && t.part_number == target.part_number && t.store_number == target.store_number)
+            || !state.watcher.is_running().await
+            || !state.admission.lock().unwrap().commit(ticket) {
+            return Err("自动加购任务已取消或过期".into());
+        }
+    }
+    drop(control);
+    let result = session
+        .add_to_bag(&product_url, &bag_url, settings.bag_applecare)
+        .await;
+    match result {
+        Ok(outcome) => {
+            session.focus();
+            Ok(outcome)
+        }
+        Err(err) => {
+            // 会话可能已经不可用（用户把窗口关了，或者连接断了）。丢掉它，
+            // 下次命中重新建一个 —— 留着一个坏会话只会一直失败下去。
+            *guard = None;
+            Err(err)
+        }
+    }
+}
+
+/// 打开买家浏览器窗口，供用户登录 Apple 账号并确认购物袋。
+///
+/// 自动加购发生在**这个窗口自己的 cookie 会话**里。用户不在这里登录，
+/// 加购之后的结账页就还是未登录状态 —— 那就等于把最省事的一步留在了最
+/// 费事的位置。所以这一步必须由用户主动做一次，程序不能代劳。
+#[tauri::command]
+async fn open_buyer_window(app: AppHandle) -> Result<String, String> {
+    let profile = apw_core::config::runtime_dir(BUYER_PROFILE_DIR).map_err(|e| e.to_string())?;
+    let target_url = settings_bag_url(&app);
+    {
+        let state = app.state::<AppState>();
+        let mut guard = state.bag.lock().await;
+        if guard.is_none() {
+            *guard = Some(bag::BagSession::start_visible(&profile).await?);
+        }
+        let session = guard.as_mut().ok_or("买家窗口不可用")?;
+        if let Some(url) = target_url.as_deref() {
+            session.navigate(url).await?;
+        }
+        session.focus();
+    }
+    Ok(profile.display().to_string())
+}
+
+/// 关闭买家浏览器窗口。
+#[tauri::command]
+async fn close_buyer_window(app: AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let mut guard = state.bag.lock().await;
+    if let Some(session) = guard.as_mut() {
+        session.shutdown();
+    }
+    *guard = None;
+    Ok(())
+}
+
+/// 手动试一次自动加购，用于在真的开售之前验证整条链路。
+#[tauri::command]
+async fn add_to_bag_now(app: AppHandle, target: Target) -> Result<String, String> {
+    let outcome = add_target_to_bag(&app, &target, None).await?;
+    // 手动试加购之后用户同样会去结账、下单，所以订单监听也要起 ——
+    // 只在「真检测到有货」那条路上起监听的话，手工演练就永远测不到订单推送。
+    watch_for_new_order(app.clone());
+    Ok(format!(
+        "{}；已停在 {}；接下来请手动结账并下单，订单确认后会自动推送到手机",
+        outcome.summary, outcome.url
+    ))
+}
+
+/// 把设置里的取货人信息填进当前打开的结账页。
+///
+/// Apple **不会**从账号预填取货联系人（实测登录状态下五栏全空），而这一步
+/// 每次都要手打。程序只填这五项，**不点提交、不碰支付**，填完由用户核对。
+#[tauri::command]
+async fn fill_pickup_info(app: AppHandle) -> Result<String, String> {
+    let settings = app
+        .try_state::<AppState>()
+        .map(|state| state.settings_snapshot())
+        .unwrap_or_default();
+    let info = bag::PickupInfo {
+        last_name: settings.pickup_last_name.clone(),
+        first_name: settings.pickup_first_name.clone(),
+        email: settings.pickup_email.clone(),
+        phone: settings.pickup_phone.clone(),
+        id_last4: settings.pickup_id_last4.clone(),
+    };
+    let missing = info.missing();
+    if !missing.is_empty() {
+        return Err(format!("请先在设置里填写取货信息：{}", missing.join("、")));
+    }
+
+    let profile = apw_core::config::runtime_dir(BUYER_PROFILE_DIR).map_err(|e| e.to_string())?;
+    let state = app.state::<AppState>();
+    let mut guard = state.bag.lock().await;
+    if guard.is_none() {
+        *guard = Some(bag::BagSession::start_visible(&profile).await?);
+    }
+    let session = guard.as_mut().ok_or("买家窗口不可用")?;
+    match session.fill_pickup_info(&info).await {
+        Ok(summary) => {
+            session.focus();
+            Ok(summary)
+        }
+        Err(err) => {
+            // 会话可能已经不可用，丢掉它，下次重新接。
+            *guard = None;
+            Err(err)
+        }
+    }
+}
+
+/// 下单后盯住订单确认页的时长。
+///
+/// 订单创建后是**待付款**状态，30 分钟不付自动取消；这段时间用户很可能已经
+/// 离开电脑，所以推送必须发出去。
+const ORDER_WATCH_SECONDS: u64 = 40 * 60;
+
+/// 后台盯一会儿买家窗口，发现订单确认页就把订单号推到手机。
+///
+/// 不放在加购流程里同步等：用户从加购到真正点「立即下单」中间可能隔着几分钟，
+/// 把流程卡在那里既没有意义，也会挡住别的提醒。
+fn watch_for_new_order(app: AppHandle) {
+    let Some(lease) = automation::OrderLease::acquire(app.state::<AppState>().order_watch.clone()) else { return; };
+    tauri::async_runtime::spawn(async move {
+        let _lease = lease;
+        let deadline = Instant::now() + Duration::from_secs(ORDER_WATCH_SECONDS);
+        while Instant::now() < deadline {
+            match read_pending_order(&app).await {
+                Ok(Some(order)) => {
+                    let fresh = app.state::<AppState>().orders.lock().unwrap().insert(order.clone());
+                    if fresh {
+                        for attempt in 0..3 {
+                            if notify_order_created(&app, &order).await { break; }
+                            if attempt < 2 { tokio::time::sleep(Duration::from_secs(4)).await; }
+                        }
+                    }
+                    // Keep the one listener alive for subsequent orders.
+
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    let _ = app.emit(NOTICE_CHANNEL, format!("读取订单状态失败：{err}"));
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(4)).await;
+        }
+    });
+}
+
+async fn read_pending_order(app: &AppHandle) -> Result<Option<String>, String> {
+    let profile = apw_core::config::runtime_dir(BUYER_PROFILE_DIR).map_err(|e| e.to_string())?;
+    // 没有买家窗口就说明用户还没走到下单这一步，不必现开一个窗口去看。
+    if crate::bag::live_port_of(&profile).await.is_none() {
+        return Ok(None);
+    }
+    let state = app.state::<AppState>();
+    let mut guard = state.bag.lock().await;
+    if guard.is_none() {
+        *guard = Some(bag::BagSession::start_visible(&profile).await?);
+    }
+    let session = guard.as_mut().ok_or("买家窗口不可用")?;
+    session.detect_order().await
+}
+
+async fn notify_order_created(app: &AppHandle, order: &str) -> bool {
+    let settings = app
+        .try_state::<AppState>()
+        .map(|state| state.settings_snapshot())
+        .unwrap_or_default();
+    // 订单页链接用地区站点拼；`/shop/order/list` 在 Apple 的域名关联文件里
+    // 属于被 Apple Store App 接管的路径，手机上点开会直接进 App 的订单页。
+    let url = region_by_locale(&settings.locale)
+        .map(|region| format!("{}/shop/order/list", region.base_url))
+        .unwrap_or_else(|| "https://www.apple.com.cn/shop/order/list".to_owned());
+
+    let mut notification =
+        Notification::new("订单已创建 · 待付款", format!("{order} · 30 分钟内有效。点这里打开订单页付款"));
+    notification = notification.with_url(url.clone());
+    let bark_url = settings.bark_url.clone();
+    match dispatch_notification(app, notification, &bark_url).await {
+        Ok(()) => {
+            let _ = app.emit(
+                NOTICE_CHANNEL,
+                format!("订单 {order} 已创建，提醒已推送（{url}）"),
+            );
+            true
+        }
+        Err(err) => {
+            let _ = app.emit(
+                NOTICE_CHANNEL,
+                format!("订单 {order} 已创建，但发送提醒失败：{err}"),
+            );
+            false
+        }
+    }
+}
+
+/// 当前设置下购物袋页面的地址。
+fn settings_bag_url(app: &AppHandle) -> Option<String> {
+    let settings = app.try_state::<AppState>()?.settings_snapshot();
+    let locale = settings
+        .targets
+        .first()
+        .map_or(settings.locale.as_str(), |target| target.locale.as_str());
+    region_by_locale(locale).map(|region| region.bag_url())
+}
+
 /// 手动测试提醒和首个目标的跳转，便于提前验证实际操作链路。
 #[tauri::command]
 async fn test_notify(app: AppHandle) -> Result<(), String> {
@@ -460,7 +758,33 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
             }
 
             let mut opened_destination = None;
-            if settings.open_on_hit != OpenOnHit::None {
+            if settings.auto_add_to_bag {
+                // 加购要等页面加载、要跑完整段购买流程，通常十几秒起步。
+                // 放进后台任务：事件泵一旦被它堵住，暂停、状态刷新这些用户
+                // 立刻要看到的东西都会跟着卡住。
+                let ticket = app.state::<AppState>().admission.lock().unwrap()
+                    .admit(&target.locale, &target.part_number);
+                let bag_app = app.clone();
+                let bag_target = target.clone();
+                if let Some(ticket) = ticket { tauri::async_runtime::spawn(async move {
+                    let notice = match add_target_to_bag(&bag_app, &bag_target, Some(ticket)).await {
+                        Ok(outcome) => {
+                            // 用户接下来要去结账、下单。订单一旦创建就是「待付款」，
+                            // 30 分钟不付会取消，所以从这一刻起盯住订单确认页。
+                            watch_for_new_order(bag_app.clone());
+                            format!(
+                                "自动加购完成：{} {}（{}）",
+                                bag_target.store_title, bag_target.product_name, outcome.summary
+                            )
+                        }
+                        Err(err) => format!(
+                            "自动加购失败：{} {} —— {err}",
+                            bag_target.store_title, bag_target.product_name
+                        ),
+                    };
+                    let _ = bag_app.emit(NOTICE_CHANNEL, notice);
+                }); }
+            } else if settings.open_on_hit != OpenOnHit::None {
                 use tauri_plugin_opener::OpenerExt;
                 match destination_url {
                     Some(url) => match app.opener().open_url(url, None::<&str>) {
@@ -501,6 +825,10 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
                     } else {
                         "Bark"
                     });
+                }
+                if settings.auto_add_to_bag {
+                    // 加购结果由后台任务单独报，这里只说一声已经开始。
+                    actions.push("自动加购受去重与结账保护约束");
                 }
                 if let Some(destination) = opened_destination {
                     match destination {
@@ -660,18 +988,26 @@ pub fn run() {
                 let watcher = watcher.clone();
                 let targets = settings.targets.clone();
                 let interval = settings.interval();
-                tauri::async_runtime::spawn(async move {
+                // 与 3d7c56e 一致：仅初始化，由用户手动开始监控。
+                // 保留 actor 屏障，确保开放命令前目标和间隔已经生效；不读取恢复标记。
+                tauri::async_runtime::block_on(async move {
                     watcher.set_targets(targets).await;
                     watcher.set_interval(interval).await;
+                    let _ = watcher.is_running().await;
                 });
             }
 
             app.manage(AppState {
                 watcher,
+                control: tokio::sync::Mutex::new(()),
+                admission: std::sync::Mutex::new(automation::Admission::default()),
+                order_watch: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                orders: std::sync::Mutex::new(std::collections::HashSet::new()),
                 catalog: Catalog::new(),
                 http: reqwest::Client::new(),
                 settings: RwLock::new(settings),
                 store,
+                bag: tokio::sync::Mutex::new(None),
             });
 
             let handle: AppHandle = app.handle().clone();
@@ -718,6 +1054,11 @@ pub fn run() {
             is_running,
             test_notify,
             open_target_product,
+            open_buyer_window,
+            close_buyer_window,
+            add_to_bag_now,
+            fill_pickup_info,
+            append_activity_log,
             check_for_update,
             install_update,
         ])

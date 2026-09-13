@@ -17,9 +17,11 @@ rand.workspace = true
 rodio.workspace = true
 dirs.workspace = true
 dom_query = "0.27"
+tempfile = "3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "test-util"] }
+tempfile = "3"
 
 [features]
 # live 打开后才会跑针对 Apple 真实接口的契约测试：

@@ -74,7 +74,14 @@ const DEFAULT_SETTINGS: Settings = {
   barkUrl: "",
   productBarkUrls: {},
   soundEnabled: true,
-  openOnHit: "bag",
+  openOnHit: "product",
+  autoAddToBag: false,
+  bagApplecare: false,
+  pickupLastName: "",
+  pickupFirstName: "",
+  pickupEmail: "",
+  pickupPhone: "",
+  pickupIdLast4: "",
 };
 
 let state: UiState = {
@@ -128,10 +135,15 @@ function pushLog(line: string): void {
 function pushLogs(lines: string[]): void {
   if (lines.length === 0) return;
   const stamp = new Date().toLocaleTimeString("zh-CN", { hour12: false });
-  const next = [...state.logs, ...lines.map((line) => `[${stamp}] ${line}`)];
+  const stamped = lines.map((line) => `[${stamp}] ${line}`);
+  const next = [...state.logs, ...stamped];
   // 定长保留。上游把日志无限拼进一个字符串，跑一整天能有几 MB，
   // 每次刷新都要重新排版，界面越用越卡。
   update({ logs: next.length > MAX_LOG_LINES ? next.slice(-MAX_LOG_LINES) : next });
+  // 再落盘一份。界面日志只活在内存里，应用一关就没了 —— 而「刚才那个 541
+  // 是什么时候冒出来的」这类问题恰恰最需要时间点。写失败不报错、不重试：
+  // 日志落不了盘不该反过来影响监控本身。
+  void invoke("append_activity_log", { lines: stamped }).catch(() => {});
 }
 
 function formatElapsed(ms: number): string {
@@ -207,8 +219,12 @@ let starting: Promise<void> | null = null;
 export function connect(): Promise<void> {
   if (starting) return starting;
   starting = (async () => {
+    let bootEvents: WatcherEvent[] | null = [];
     unlisteners = await Promise.all([
-      listen<WatcherEvent>(EVENT_CHANNEL, (e) => applyEvent(e.payload)),
+      listen<WatcherEvent>(EVENT_CHANNEL, (e) => {
+        if (bootEvents) bootEvents.push(e.payload);
+        else applyEvent(e.payload);
+      }),
       listen<string>(NOTICE_CHANNEL, (e) => pushLog(e.payload)),
     ]);
 
@@ -220,7 +236,16 @@ export function connect(): Promise<void> {
       invoke<boolean>("is_running"),
     ]);
     update({ regions, categories, settings, rows, running, ready: true });
+    const pending = bootEvents;
+    bootEvents = null;
+    for (const event of pending) applyEvent(event);
     await loadCatalog(settings.locale);
+    // 启动写一行。日志一旦落盘，这一行就是「应用是几点被打开/被重启的」的唯一
+    // 凭据 —— 排查「重启之后监控为什么没在跑」时，先要确定的就是这个时间点。
+    pushLog(
+      `已就绪：${settings.targets.length} 项监控、查询间隔 ${settings.intervalSeconds} 秒，` +
+        `当前${running ? "正在" : "未在"}监控。`,
+    );
     // 启动时静默查一次。查不到就算了，不打扰用户 —— 网络不通、GitHub 抽风
     // 都会走到这里，跟「有没有新版本」是两回事。
     void checkForUpdate({ quiet: true });
@@ -423,6 +448,55 @@ export async function openTargetProduct(target: Target): Promise<void> {
     await invoke("open_target_product", { target });
   } catch (err) {
     pushLog(`打开商品页失败：${String(err)}`);
+  }
+}
+
+/**
+ * 打开买家浏览器窗口。
+ *
+ * 自动加购用的是这个窗口自己的 cookie 会话，所以用户必须在里面登录一次
+ * Apple 账号 —— 程序不碰登录，也就无法代劳。
+ */
+export async function openBuyerWindow(): Promise<void> {
+  try {
+    const path = await invoke<string>("open_buyer_window");
+    pushLog(`已打开买家浏览器（${path}）。请在这个窗口里登录 Apple 账号，之后自动加购都发生在这里。`);
+  } catch (err) {
+    pushLog(`打开买家浏览器失败：${String(err)}`);
+  }
+}
+
+export async function closeBuyerWindow(): Promise<void> {
+  try {
+    await invoke("close_buyer_window");
+    pushLog("已关闭买家浏览器。");
+  } catch (err) {
+    pushLog(`关闭买家浏览器失败：${String(err)}`);
+  }
+}
+
+/** 手动试一次自动加购：先在真的开售之前把整条链路验证一遍。 */
+export async function addToBagNow(target: Target): Promise<void> {
+  pushLog(`开始自动加购：${target.productName}（可能需要十几秒）…`);
+  try {
+    const result = await invoke<string>("add_to_bag_now", { target });
+    pushLog(`自动加购成功：${result}`);
+  } catch (err) {
+    pushLog(`自动加购失败：${String(err)}`);
+  }
+}
+
+/**
+ * 把设置里的取货人信息填进当前打开的结账页。
+ *
+ * 只在结账页「填写取货详情」那一步有用；不提交订单、不接触支付信息。
+ */
+export async function fillPickupInfo(): Promise<void> {
+  try {
+    const result = await invoke<string>("fill_pickup_info");
+    pushLog(`取货信息：${result}`);
+  } catch (err) {
+    pushLog(`代填取货信息失败：${String(err)}`);
   }
 }
 

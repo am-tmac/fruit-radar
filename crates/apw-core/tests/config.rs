@@ -90,7 +90,52 @@ fn 样例设置() -> Settings {
             .collect(),
         sound_enabled: false,
         open_on_hit: OpenOnHit::Product,
+        auto_add_to_bag: true,
+        bag_applecare: true,
+        pickup_last_name: "FixtureLast".into(),
+        pickup_first_name: "FixtureFirst".into(),
+        pickup_email: "pickup-fixture@example.invalid".into(),
+        pickup_phone: "00000000000".into(),
+        pickup_id_last4: "0000".into(),
     }
+}
+
+/// 自动加购的两个开关必须能存能取。
+///
+/// 它们决定程序会不会替用户在网页上动手，跟错一次就是误加一个不需要的
+/// 商品（甚至误选 AppleCare+）。所以宁可写一条单独的路往返测试，也不要
+/// 只靠「样例设置」里顺带覆盖。
+#[test]
+fn 自动加购开关能往返存取() {
+    let dir = 临时目录::new("autobag");
+    let store = SettingsStore::at(dir.设置路径());
+
+    let mut want = 样例设置();
+    want.auto_add_to_bag = true;
+    want.bag_applecare = false;
+    store.save(&want).expect("保存失败");
+
+    let got = store.load().expect("读取失败");
+    assert!(got.auto_add_to_bag, "自动加购开关丢了");
+    assert!(!got.bag_applecare, "AppleCare 选项丢了");
+}
+
+/// 老配置文件里没有这两个字段时，必须落到「关闭」而不是「开启」。
+///
+/// 升级不该替用户打开一个会替他操作网页的开关：默认必须是保守的那一侧。
+#[test]
+fn 缺少字段的旧配置不会自动开启自动加购() {
+    let dir = 临时目录::new("autobag-default");
+    let store = SettingsStore::at(dir.设置路径());
+    fs::write(
+        dir.设置路径(),
+        br#"{"locale":"zh_CN","intervalSeconds":30,"soundEnabled":true,"openOnHit":"bag"}"#,
+    )
+    .expect("写测试文件失败");
+
+    let got = store.load().expect("读取失败");
+    assert!(!got.auto_add_to_bag);
+    assert!(!got.bag_applecare);
 }
 
 #[test]
@@ -248,9 +293,10 @@ fn 缺字段的文件取默认值而不是取零值() {
 
     let got = SettingsStore::at(path).load().expect("读取失败");
     // 老版本写下的文件可能少几个字段。缺字段当零值处理的话，用户什么都没改，
-    // 提示音和自动开购物袋却会自己关掉。
+    // 提示音自己就会关掉、跳转方式也会被改掉。
     assert!(got.sound_enabled);
-    assert_eq!(got.open_on_hit, OpenOnHit::Bag);
+    // 落到**当前**默认值，而不是历史上碰巧是默认值的那个枚举项。
+    assert_eq!(got.open_on_hit, OpenOnHit::default());
     assert_eq!(got.interval_seconds, DEFAULT_INTERVAL_SECONDS);
 }
 
@@ -499,13 +545,20 @@ fn 设置的线上格式是小驼峰() {
         "productBarkUrls",
         "soundEnabled",
         "openOnHit",
+        "autoAddToBag",
+        "bagApplecare",
+        "pickupLastName",
+        "pickupFirstName",
+        "pickupEmail",
+        "pickupPhone",
+        "pickupIdLast4",
     ] {
         assert!(obj.contains_key(key), "缺少字段 {key}：{value}");
     }
     assert!(!obj.contains_key("interval_seconds"), "不该有蛇形字段");
     assert_eq!(obj.get("openOnHit"), Some(&serde_json::json!("product")));
     assert!(!obj.contains_key("openBagOnHit"));
-    assert_eq!(obj.len(), 7);
+    assert_eq!(obj.len(), 14);
 }
 
 #[test]

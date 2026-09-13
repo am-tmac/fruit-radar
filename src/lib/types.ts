@@ -94,6 +94,16 @@ export interface Settings {
   barkUrl: string;
   soundEnabled: boolean;
   openOnHit: OpenOnHit;
+  /** 有货时在专属的买家浏览器里自动把商品加入购物袋（不结账）。 */
+  autoAddToBag: boolean;
+  /** 自动加购时是否选择 AppleCare+。 */
+  bagApplecare: boolean;
+  /** 门店取货的取货联系人信息：Apple 不会从账号预填，由程序代填。 */
+  pickupLastName: string;
+  pickupFirstName: string;
+  pickupEmail: string;
+  pickupPhone: string;
+  pickupIdLast4: string;
 }
 
 /** 监控目标的唯一键，与 Rust 侧 Target::key 的构成保持一致。 */

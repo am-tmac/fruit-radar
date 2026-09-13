@@ -1,12 +1,8 @@
 //! 通过独立的无界面 Chromium 会话查询 Apple 库存。
 //!
-//! Apple 当前会在商品页执行 `shop/shld/v2_1/verify.js`，完成浏览器环境校验后才
-//! 接受库存请求。普通 HTTP 客户端或 WKWebView 即便拿到了部分 Cookie，仍会收到
-//! HTTP 541；真正的 Chromium 会话则能得到正常 JSON。这里启动一个使用临时资料
-//! 目录的后台浏览器，通过 DevTools 协议复用同一会话查询所有门店。
-//!
-//! 这个实现不会读取用户现有 Chrome 的个人资料、Cookie 或浏览记录。临时目录随
-//! 会话销毁，浏览器进程也由应用持有并在退出时终止。
+//! 每个查询会话使用独立临时 profile，通过 DevTools 复用同一会话查询所有门店。
+//! 不读取、迁移或清理旧 profile；只回收本会话创建的目录和进程。
+//! HTTP 541 是拦截结果，不能据此判断冷会话、IP 或具体原因。
 
 #[cfg(target_os = "macos")]
 use std::path::Path;
@@ -20,7 +16,6 @@ use apw_core::model::Region;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tempfile::TempDir;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
@@ -47,19 +42,44 @@ struct DebugTarget {
 
 #[derive(Debug)]
 struct ChromiumSession {
-    child: Child,
-    _profile: TempDir,
+    _child: OwnedChild,
+    // Field order reaps the owned child before deleting its temporary profile.
+    _profile: tempfile::TempDir,
     socket: Socket,
     next_command_id: u64,
     locale: Option<&'static str>,
     last_inventory_request: Option<Instant>,
 }
 
-impl Drop for ChromiumSession {
+#[derive(Debug)]
+struct OwnedChild(Child);
+impl Drop for OwnedChild {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
+}
+
+#[cfg(test)]
+mod ownership_regressions {
+    use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_start_reaps_only_its_child() {
+        let child = Command::new("/bin/sleep").arg("60").spawn().unwrap();
+        let pid = child.id();
+        let guard = OwnedChild(child);
+        let task = tokio::spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        });
+        task.abort();
+        let _ = task.await;
+        let status = Command::new("/bin/kill").args(["-0", &pid.to_string()])
+            .stderr(Stdio::null()).status().unwrap();
+        assert!(!status.success());
+    }
+
 }
 
 impl ChromiumSession {
@@ -81,7 +101,7 @@ impl ChromiumSession {
             .map_err(|e| ApiError::Transport(format!("无法创建 Chromium 临时目录：{e}")))?;
         let profile_arg = format!("--user-data-dir={}", profile.path().display());
         let user_agent_arg = format!("--user-agent={user_agent}");
-        let mut child = Command::new(chrome)
+        let mut child = OwnedChild(Command::new(chrome)
             .args([
                 "--headless=new",
                 "--remote-debugging-port=0",
@@ -100,7 +120,7 @@ impl ChromiumSession {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| ApiError::Transport(format!("无法启动 Chromium：{e}")))?;
+            .map_err(|e| ApiError::Transport(format!("无法启动 Chromium：{e}")))?);
 
         let port_file = profile.path().join("DevToolsActivePort");
         let deadline = Instant::now() + CHROME_START_TIMEOUT;
@@ -111,7 +131,7 @@ impl ChromiumSession {
             {
                 break port;
             }
-            if let Some(status) = child
+            if let Some(status) = child.0
                 .try_wait()
                 .map_err(|e| ApiError::Transport(format!("无法检查 Chromium 状态：{e}")))?
             {
@@ -120,7 +140,7 @@ impl ChromiumSession {
                 )));
             }
             if Instant::now() >= deadline {
-                let _ = child.kill();
+                let _ = child.0.kill();
                 return Err(ApiError::Transport("等待 Chromium 启动超时".into()));
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -148,7 +168,7 @@ impl ChromiumSession {
             .map_err(|e| ApiError::Transport(format!("无法连接 Chromium 页面：{e}")))?;
 
         Ok(Self {
-            child,
+            _child: child,
             _profile: profile,
             socket,
             next_command_id: 1,
@@ -378,7 +398,7 @@ struct BrowserPayload {
     body: String,
 }
 
-fn find_chromium() -> Option<PathBuf> {
+pub(crate) fn find_chromium() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     const ABSOLUTE_CANDIDATES: &[&str] = &[
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -436,7 +456,7 @@ fn find_chromium() -> Option<PathBuf> {
     })
 }
 
-fn chromium_user_agent() -> String {
+pub(crate) fn chromium_user_agent() -> String {
     format!(
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{FALLBACK_CHROMIUM_MAJOR}.0.0.0 Safari/537.36"
@@ -506,8 +526,8 @@ impl AppleChromiumFetcher {
                 parse_pickup_message(bytes, store_number)
             }
             403 | 541 => {
-                // 当前浏览器会话已经被拒绝。直接销毁临时资料与进程；下一轮会用
-                // 全新会话重新握手，不拿失效 Cookie 反复撞接口。
+                // Match 3d7c56e: discard this session and its temporary profile.
+                // HTTP status alone does not establish why the request was blocked.
                 *guard = None;
                 Err(ApiError::Blocked(format!("HTTP {}", payload.status)))
             }
@@ -552,7 +572,7 @@ mod tests {
                 .send(Message::Text(response.to_string().into()))
                 .await
                 .unwrap();
-            // 观察浏览器一端的连接生命周期，不依赖查询器内部的 Option 状态。
+            // Match 3d7c56e: rejected sessions close without extra CDP commands.
             matches!(
                 tokio::time::timeout(Duration::from_millis(500), socket.next()).await,
                 Ok(None) | Ok(Some(Err(_))) | Ok(Some(Ok(Message::Close(_))))
@@ -560,11 +580,11 @@ mod tests {
         });
         let (socket, _) = connect_async(format!("ws://{address}")).await.unwrap();
         let session = ChromiumSession {
-            child: Command::new("rustc")
+            _child: OwnedChild(Command::new("rustc")
                 .arg("--version")
                 .stdout(Stdio::null())
                 .spawn()
-                .unwrap(),
+                .unwrap()),
             _profile: tempfile::tempdir().unwrap(),
             socket,
             next_command_id: 1,
@@ -619,7 +639,34 @@ mod tests {
                 assert!(matches!(result, Err(ApiError::Blocked(_))));
             }
             assert_eq!(peer.await.unwrap(), should_close, "HTTP {status}");
+
         }
+    }
+
+    #[tokio::test]
+    async fn blocked_query_discards_its_profile_like_3d7c56e() {
+        let (fetcher, peer) = cdp_fixture(json!({
+            "result": {"result": {"value": {"status": 541, "body": "{}"}}}
+        })).await;
+        let root = tempfile::tempdir().unwrap();
+        let profile = tempfile::Builder::new()
+            .prefix("apple-store-inventory-monitor-chromium-")
+            .tempdir_in(root.path()).unwrap();
+        let legacy = root.path().join("apple-store-inventory-monitor-chromium-unknown");
+        std::fs::create_dir(&legacy).unwrap();
+        std::fs::write(legacy.join("SingletonLock"), "unknown owner").unwrap();
+        let path = profile.path().to_path_buf();
+        std::fs::write(path.join("Cookies"), "fixture cookie, never real data").unwrap();
+        {
+            let mut guard = fetcher.session.lock().await;
+            guard.as_mut().unwrap()._profile = profile;
+        }
+        let result = fetcher.pickup_message(region_by_locale("zh_CN").unwrap(), "R390",
+            &["MG6X4CH/A".to_string()]).await;
+        assert!(matches!(result, Err(ApiError::Blocked(_))));
+        assert!(peer.await.unwrap());
+        assert!(!path.exists(), "HTTP 541 must discard owned temporary cookies, not retain them");
+        assert_eq!(std::fs::read_to_string(legacy.join("SingletonLock")).unwrap(), "unknown owner");
     }
 
     #[test]

@@ -231,7 +231,7 @@ impl Notifier for Bark {
             .await
             .map_err(|e| NotifyError::Transport {
                 channel: BARK.to_string(),
-                detail: e.to_string(),
+                detail: e.without_url().to_string(),
             })?;
 
         let status = resp.status();
@@ -272,7 +272,7 @@ async fn read_capped(resp: &mut reqwest::Response, max: usize) -> Result<Vec<u8>
             Err(e) => {
                 return Err(NotifyError::Transport {
                     channel: BARK.to_string(),
-                    detail: format!("读取响应失败：{e}"),
+                    detail: format!("读取响应失败：{}", e.without_url()),
                 });
             }
         }

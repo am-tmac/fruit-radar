@@ -5,6 +5,7 @@ import {
   BellRing,
   Clock3,
   Download,
+  LogIn,
   MapPin,
   PackageCheck,
   PackageX,
@@ -14,10 +15,13 @@ import {
   Radar,
   RefreshCw,
   Settings2,
+  ShieldPlus,
   ShoppingBag,
+  ShoppingCart,
   Smartphone,
   SquareTerminal,
   Trash2,
+  UserRound,
   Volume2,
   X,
 } from "lucide-react";
@@ -63,10 +67,14 @@ import {
 } from "@/components/ui/tooltip";
 
 import {
+  addToBagNow,
   changeLocale,
+  closeBuyerWindow,
   connect,
   dismissUpdate,
+  fillPickupInfo,
   installUpdate,
+  openBuyerWindow,
   openReleasePage,
   openTargetProduct,
   refreshProducts,
@@ -240,6 +248,8 @@ export default function App() {
   const [isAdding, setIsAdding] = useState(false);
   const [barkDraft, setBarkDraft] = useState<string | null>(null);
   const [intervalDraft, setIntervalDraft] = useState<number | null>(null);
+  // 清空取货信息后要靠它重挂载输入框，否则非受控的输入框还显示旧值。
+  const [pickupFormKey, setPickupFormKey] = useState(0);
 
   const barkValue = barkDraft ?? ui.settings.barkUrl;
   const intervalValue = intervalDraft ?? ui.settings.intervalSeconds;
@@ -649,16 +659,33 @@ export default function App() {
                               />
                             </TableCell>
                             <TableCell className="pr-3">
-                              <Button
-                                variant="ghost"
-                                size="icon-sm"
-                                className="text-muted-foreground opacity-60 hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
-                                aria-label="删除这条监控"
-                                disabled={isAdding}
-                                onClick={() => void onRemove(row.target)}
-                              >
-                                <Trash2 />
-                              </Button>
+                              <div className="flex items-center justify-end gap-0.5">
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <Button
+                                      variant="ghost"
+                                      size="icon-sm"
+                                      className="text-muted-foreground opacity-60 hover:bg-primary/10 hover:text-primary group-hover:opacity-100"
+                                      aria-label={`试一次自动加购：${row.target.productName}`}
+                                      disabled={isAdding}
+                                      onClick={() => void addToBagNow(row.target)}
+                                    >
+                                      <ShoppingCart aria-hidden="true" />
+                                    </Button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>试一次自动加购（只加到购物袋，不结账）</TooltipContent>
+                                </Tooltip>
+                                <Button
+                                  variant="ghost"
+                                  size="icon-sm"
+                                  className="text-muted-foreground opacity-60 hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
+                                  aria-label="删除这条监控"
+                                  disabled={isAdding}
+                                  onClick={() => void onRemove(row.target)}
+                                >
+                                  <Trash2 />
+                                </Button>
+                              </div>
                             </TableCell>
                           </TableRow>
                         ))
@@ -693,8 +720,11 @@ export default function App() {
                 </div>
               </section>
 
-              <section className="surface-panel shrink-0 p-4" aria-labelledby="preferences-title">
-                <div className="mb-4 flex items-center gap-3">
+              <section
+                className="surface-panel flex min-h-0 flex-1 flex-col overflow-hidden p-4"
+                aria-labelledby="preferences-title"
+              >
+                <div className="mb-4 flex shrink-0 items-center gap-3">
                   <div className="section-icon" aria-hidden="true"><Settings2 className="size-4" /></div>
                   <div>
                     <h2 id="preferences-title" className="text-sm font-semibold">监控设置</h2>
@@ -702,6 +732,10 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* 这一栏的内容会随功能增加而变长，必须让它自己滚动。
+                    原来是 shrink-0，设置项一多就把下面的活动日志整块顶出可视区，
+                    而且整页不跟着滚 —— 用户看到的现象就是「下面没了，也滑不动」。 */}
+                <ScrollArea className="min-h-0 flex-1 pr-1">
                 <div className="field-group">
                   <Label htmlFor="interval" className="control-label">
                     <Clock3 className="size-3.5" aria-hidden="true" /> 查询间隔
@@ -774,14 +808,148 @@ export default function App() {
                       </SelectContent>
                     </Select>
                   </div>
+                  <p className="px-2 pb-1.5 text-[11px] leading-4 text-muted-foreground">
+                    选「商品详情」时，手机上点通知会直接唤起 <span className="text-foreground/80">Apple Store App</span>；选「购物袋」只能打开 Safari。
+                  </p>
+                  <div className="setting-row gap-3">
+                    <Label htmlFor="auto-add-to-bag" className="flex items-center gap-2 text-sm font-normal">
+                      <ShoppingCart className="size-4 text-muted-foreground" aria-hidden="true" />有货时自动加入购物袋
+                    </Label>
+                    <Switch
+                      id="auto-add-to-bag"
+                      aria-label="有货时自动加入购物袋"
+                      checked={ui.settings.autoAddToBag}
+                      onCheckedChange={(value) => void saveSettings({ autoAddToBag: value })}
+                    />
+                  </div>
+                  {ui.settings.autoAddToBag && (
+                    <div className="setting-row gap-3">
+                      <Label htmlFor="bag-applecare" className="flex items-center gap-2 text-sm font-normal">
+                        <ShieldPlus className="size-4 text-muted-foreground" aria-hidden="true" />加入 AppleCare+
+                      </Label>
+                      <Switch
+                        id="bag-applecare"
+                        aria-label="加入 AppleCare+"
+                        checked={ui.settings.bagApplecare}
+                        onCheckedChange={(value) => void saveSettings({ bagApplecare: value })}
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {ui.settings.autoAddToBag && (
+                  <div className="mt-3 rounded-xl border border-border/55 bg-background/30 p-3">
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      自动加购在独立的「买家」浏览器里进行，用的是那个窗口自己的登录状态。
+                      <span className="text-foreground/90">请先打开它并登录 Apple 账号</span>
+                      ，否则加进购物袋的商品在结账时仍是未登录状态。登录同一个 Apple ID 后，
+                      桌面加进购物袋的东西在手机的 Apple Store App 里也能看到。
+                      开启后不再另外调用系统浏览器。程序只点到「添加到购物袋」为止，付款留给你。
+                    </p>
+                    <div className="mt-2.5 flex gap-2">
+                      <Button
+                        variant="outline"
+                        className="h-9 flex-1 rounded-xl border-border/70 bg-background/30"
+                        onClick={() => void openBuyerWindow()}
+                      >
+                        <LogIn aria-hidden="true" /> 打开买家窗口
+                      </Button>
+                      <Button
+                        variant="outline"
+                        className="h-9 rounded-xl border-border/70 bg-background/30"
+                        onClick={() => void closeBuyerWindow()}
+                      >
+                        <X aria-hidden="true" /> 关闭
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                <div key={pickupFormKey} className="mt-4 rounded-xl border border-border/55 bg-background/30 p-3">
+                  <div className="flex items-center gap-2 text-sm">
+                    <UserRound className="size-4 text-muted-foreground" aria-hidden="true" />
+                    取货信息（结账时代填）
+                  </div>
+                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                    Apple 不会从账号预填门店取货的联系人，每次都得手打。在这里填一次，走到结账页「继续填写取货详情」时点下面的按钮即可代填。
+                    <span className="text-foreground/80">程序只填这五栏，不提交订单、不碰支付。</span>
+                    这几项存在本机配置里，可随时清空。
+                  </p>
+                  <div className="mt-2.5 grid grid-cols-2 gap-2">
+                    <Input
+                      className="control-surface select-text"
+                      placeholder="姓氏"
+                      aria-label="取货人姓氏"
+                      defaultValue={ui.settings.pickupLastName}
+                      onBlur={(event) => void saveSettings({ pickupLastName: event.target.value.trim() })}
+                    />
+                    <Input
+                      className="control-surface select-text"
+                      placeholder="名字"
+                      aria-label="取货人名字"
+                      defaultValue={ui.settings.pickupFirstName}
+                      onBlur={(event) => void saveSettings({ pickupFirstName: event.target.value.trim() })}
+                    />
+                  </div>
+                  <Input
+                    className="mt-2 control-surface select-text"
+                    placeholder="电子邮件地址"
+                    aria-label="取货人电子邮箱"
+                    defaultValue={ui.settings.pickupEmail}
+                    onBlur={(event) => void saveSettings({ pickupEmail: event.target.value.trim() })}
+                  />
+                  <Input
+                    className="mt-2 control-surface select-text"
+                    placeholder="手机号码"
+                    aria-label="取货人手机号码"
+                    defaultValue={ui.settings.pickupPhone}
+                    onBlur={(event) => void saveSettings({ pickupPhone: event.target.value.trim() })}
+                  />
+                  <Input
+                    className="mt-2 control-surface select-text"
+                    placeholder="身份证件号码后四位"
+                    aria-label="身份证件后四位"
+                    maxLength={4}
+                    defaultValue={ui.settings.pickupIdLast4}
+                    onBlur={(event) => void saveSettings({ pickupIdLast4: event.target.value.trim() })}
+                  />
+                  <div className="mt-2.5 flex gap-2">
+                    <Button
+                      variant="outline"
+                      className="h-9 flex-1 rounded-xl border-border/70 bg-background/30"
+                      onClick={() => void fillPickupInfo()}
+                    >
+                      <UserRound aria-hidden="true" /> 填写到结账页
+                    </Button>
+                    <Button
+                      variant="outline"
+                      className="h-9 rounded-xl border-border/70 bg-background/30"
+                      onClick={() => {
+                        void saveSettings({
+                          pickupLastName: "",
+                          pickupFirstName: "",
+                          pickupEmail: "",
+                          pickupPhone: "",
+                          pickupIdLast4: "",
+                        });
+                        setPickupFormKey((key) => key + 1);
+                      }}
+                    >
+                      清空
+                    </Button>
+                  </div>
                 </div>
 
                 <Button variant="outline" className="mt-3 h-10 w-full rounded-xl border-border/70 bg-background/30" onClick={() => void testNotify()}>
                   <BellRing aria-hidden="true" /> 测试提醒与跳转
                 </Button>
+                </ScrollArea>
               </section>
 
-              <section className="surface-panel flex min-h-[150px] flex-1 flex-col overflow-hidden" aria-labelledby="activity-log-title">
+              <section
+                className="surface-panel flex h-[24vh] min-h-[140px] shrink-0 flex-col overflow-hidden"
+                aria-labelledby="activity-log-title"
+              >
                 <div className="flex shrink-0 items-center justify-between border-b border-border/60 px-4 py-3">
                   <div className="flex items-center gap-2.5">
                     <SquareTerminal className="size-4 text-muted-foreground" aria-hidden="true" />

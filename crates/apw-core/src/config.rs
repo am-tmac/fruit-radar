@@ -36,8 +36,14 @@ use crate::model::{REGIONS, Target, region_by_locale};
 #[serde(rename_all = "snake_case")]
 pub enum OpenOnHit {
     None,
-    #[default]
     Bag,
+    /// 默认打开商品页。
+    ///
+    /// **不是随意选的默认值**：Apple 的域名关联文件里，只有 Apple Store app
+    /// （`com.apple.store.Jolly`）接管 apple.com 链接，而它接管的路径包含
+    /// `/shop/buy-*`、`/shop/product/*`，**不包含 `/shop/bag`**。所以商品页链接
+    /// 在手机上会直接唤起 Apple Store app，购物袋链接只能落到 Safari。
+    #[default]
     Product,
 }
 
@@ -188,6 +194,34 @@ pub struct Settings {
     /// 有货时自动打开的页面；旧字段 `openBagOnHit` 通过别名兼容。
     #[serde(alias = "openBagOnHit")]
     pub open_on_hit: OpenOnHit,
+    /// 有货时是否在专属的「买家」浏览器里自动把该商品加入购物袋。
+    ///
+    /// 与 [`open_on_hit`](Self::open_on_hit) 的区别是「谁来点那一下」：
+    /// 后者是把链接交给系统默认浏览器，用户自己操作；这个开关由程序在
+    /// 一个已登录的持久 profile 里替用户点完「添加到购物袋」，然后停在
+    /// 购物袋页面等用户结账。**不会、也不会尝试自动提交订单或付款。**
+    pub auto_add_to_bag: bool,
+    /// 自动加购时是否选择 AppleCare+。默认不加。
+    ///
+    /// 这个选项必须显式回答：Apple 的购买页在 AppleCare 未选时会把
+    /// 「添加到购物袋」一直保持禁用，不选就永远点不动。
+    pub bag_applecare: bool,
+    /// 取货人：姓氏。
+    ///
+    /// 门店取货的结账表单**不会**从 Apple 账号预填任何一项（实测：登录状态下
+    /// 五栏全空），每次都要手打，几秒钟就没了。这五项存在本地，由程序在结账页
+    /// 代填，用户只需核对与付款。**程序不提交订单、不碰支付信息。**
+    pub pickup_last_name: String,
+    /// 取货人：名字。
+    pub pickup_first_name: String,
+    /// 取货人：电子邮箱（电子收据与订单状态发送至此）。
+    pub pickup_email: String,
+    /// 取货人：手机号码（下单后无法更改）。
+    pub pickup_phone: String,
+    /// 取货人：政府颁发身份证件号码的**后四位**。
+    ///
+    /// Apple 对部分商品在取货时核验身份，需要这一项。
+    pub pickup_id_last4: String,
 }
 
 /// 内置地区表里的第一个 locale，作为兜底取值。
@@ -206,7 +240,14 @@ impl Default for Settings {
             bark_url: String::new(),
             product_bark_urls: BTreeMap::new(),
             sound_enabled: true,
-            open_on_hit: OpenOnHit::Bag,
+            open_on_hit: OpenOnHit::default(),
+            auto_add_to_bag: false,
+            bag_applecare: false,
+            pickup_last_name: String::new(),
+            pickup_first_name: String::new(),
+            pickup_email: String::new(),
+            pickup_phone: String::new(),
+            pickup_id_last4: String::new(),
         }
     }
 }
@@ -292,6 +333,30 @@ impl Settings {
 pub struct SettingsStore {
     path: PathBuf,
     previous_path: Option<PathBuf>,
+}
+
+/// 应用数据目录本身（`APP_DIR`，不含文件名）。
+///
+/// 活动日志、浏览器 profile 都放在这里，用户删掉这一个目录就能清掉应用在本机
+/// 留下的全部痕迹。
+pub fn app_dir() -> Result<PathBuf, ConfigError> {
+    let dir = dirs::config_dir().ok_or(ConfigError::NoConfigDir)?;
+    Ok(dir.join(APP_DIR))
+}
+
+/// 运行期数据目录：浏览器 profile 之类的持久文件放在这里。
+///
+/// 与设置文件同处 [`APP_DIR`] 之下，好处是「删掉这个目录」就能把应用在本机
+/// 留下的所有痕迹一次清干净，不必让用户去猜散落在哪些位置。
+pub fn runtime_dir(name: &str) -> Result<PathBuf, ConfigError> {
+    Ok(app_dir()?.join(name))
+}
+
+/// 「上次退出时在不在监控」的那个小文件。
+///
+/// 独立于设置文件：它是运行状态而非用户偏好，见 [`crate::resume`]。
+pub fn resume_state_path() -> Result<PathBuf, ConfigError> {
+    Ok(app_dir()?.join("monitoring.state"))
 }
 
 impl SettingsStore {
@@ -643,6 +708,15 @@ impl LegacySettings {
                 Some(false) => OpenOnHit::None,
                 None => fallback.open_on_hit,
             },
+            // 老版本没有自动加购这个概念，迁移后一律关闭：升级不该替用户
+            // 打开一个会替他操作网页的开关。
+            auto_add_to_bag: fallback.auto_add_to_bag,
+            bag_applecare: fallback.bag_applecare,
+            pickup_last_name: String::new(),
+            pickup_first_name: String::new(),
+            pickup_email: String::new(),
+            pickup_phone: String::new(),
+            pickup_id_last4: String::new(),
         };
         settings.normalize();
         settings
@@ -673,7 +747,10 @@ mod tests {
         assert_eq!(before, s);
         assert_eq!(s.interval_seconds, DEFAULT_INTERVAL_SECONDS);
         assert!(s.sound_enabled);
-        assert_eq!(s.open_on_hit, OpenOnHit::Bag);
+        // 默认值是「商品详情」而不是「购物袋」：Apple 的域名关联文件里，只有
+        // Apple Store app 接管 apple.com 链接，且它不接管 /shop/bag ——
+        // 购物袋链接在手机上只能落到 Safari，商品页链接能直接唤起 App。
+        assert_eq!(s.open_on_hit, OpenOnHit::Product);
         assert!(region_by_locale(&s.locale).is_some());
     }
 
@@ -816,7 +893,8 @@ mod tests {
         // Go 版 Default() 里这两项都是 true。缺字段当成 false 会让用户在完全
         // 没动过设置的情况下，升级之后提示音自己关掉了。
         assert!(s.sound_enabled);
-        assert_eq!(s.open_on_hit, OpenOnHit::Bag);
+        // 同理：缺字段要落到**当前**默认值，而不是历史上碰巧是默认值的那个枚举项。
+        assert_eq!(s.open_on_hit, OpenOnHit::default());
     }
 
     #[test]
