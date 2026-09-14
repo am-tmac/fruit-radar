@@ -44,7 +44,7 @@ export function MultiCombobox({
     const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
     if (terms.length === 0) return options;
     return options.filter((option) => {
-      const text = `${option.label} ${option.value}`.toLocaleLowerCase();
+      const text = `${option.label} ${option.description ?? ""} ${option.value}`.toLocaleLowerCase();
       return terms.every((term) => text.includes(term));
     });
   }, [options, query]);
@@ -58,7 +58,9 @@ export function MultiCombobox({
       : selectedOptions.length === 1
         ? selectedOptions[0]?.label
         : `已选 ${selectedOptions.length} ${selectionUnit}`;
-  const selectedTitle = selectedOptions.map((option) => option.label).join("\n");
+  const selectedTitle = selectedOptions
+    .map((option) => [option.label, option.description].filter(Boolean).join(" — "))
+    .join("\n");
 
   function toggle(value: string, checked: boolean) {
     if (checked) {
@@ -97,7 +99,7 @@ export function MultiCombobox({
       </PopoverTrigger>
 
       <PopoverContent
-        className="w-auto min-w-(--radix-popover-trigger-width) max-w-[min(90vw,42rem)] p-0"
+        className="w-auto min-w-(--radix-popover-trigger-width) max-w-[min(94vw,60rem)] p-0"
         align="start"
       >
         <div className="flex items-center gap-2 rounded-t-md border-b px-3 focus-within:ring-2 focus-within:ring-ring/50 focus-within:ring-inset">
@@ -157,7 +159,14 @@ export function MultiCombobox({
                     checked={selected.has(option.value)}
                     onCheckedChange={(checked) => toggle(option.value, checked === true)}
                   />
-                  <span className="whitespace-normal">{option.label}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block whitespace-normal leading-5">{option.label}</span>
+                    {option.description ? (
+                      <span className="mt-0.5 block whitespace-normal text-xs leading-4 text-muted-foreground">
+                        {option.description}
+                      </span>
+                    ) : null}
+                  </span>
                 </label>
               );
             })

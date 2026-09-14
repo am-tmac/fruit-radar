@@ -678,12 +678,14 @@ impl ProductSelection {
                     let Some(text) = (category == Category::Mac)
                         .then(|| mac_dimension_label(dim.name, dim.value))
                         .flatten()
-                        .or_else(|| self.display_name(dim.key, dim.value))
                         .or_else(|| {
+                            // Watch 的结构化材质/连接值比营销 HTML 稳定。官网可能把
+                            // aluminum 的 header 写成“新外观”，不能让它覆盖“铝金属”。
                             (category == Category::Watch)
                                 .then(|| watch_dimension_fallback(dim.name, dim.value))
                                 .flatten()
                         })
+                        .or_else(|| self.display_name(dim.key, dim.value))
                         .or_else(|| {
                             // 取不到本地化文案时，只有取值本身还认得出来才拿它顶替。
                             // 颜色是 `cosmicorange` 这种词，留着比留空强 —— 留空会让

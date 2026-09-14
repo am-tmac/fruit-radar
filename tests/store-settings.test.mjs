@@ -148,13 +148,13 @@ test("test notification waits for the cleared Bark address to finish saving", as
   assert.equal(ctx.persisted().barkUrl, "");
 });
 
-test("a failed write does not prevent subsequent edits", async () => {
+test("saveSettings reports write failure and later success", async () => {
   const ctx = await setup();
   const originalInvoke = invoke;
   invoke = async () => { throw new Error("disk unavailable"); };
-  await ctx.store.saveSettings({ soundEnabled: false });
+  assert.equal(await ctx.store.saveSettings({ soundEnabled: false }), false);
   invoke = originalInvoke;
-  await ctx.store.saveSettings({ barkUrl: "" });
+  assert.equal(await ctx.store.saveSettings({ barkUrl: "" }), true);
   assert.deepEqual(ctx.persisted(), { ...defaults, barkUrl: "" });
 });
 

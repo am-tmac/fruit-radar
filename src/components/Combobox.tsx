@@ -16,6 +16,7 @@ import { cn } from "@/lib/utils";
 export interface ComboboxOption {
   value: string;
   label: string;
+  description?: string;
 }
 
 /**
@@ -83,7 +84,7 @@ export function Combobox({
               {options.map((option) => (
                 <CommandItem
                   key={option.value}
-                  value={option.label}
+                  value={`${option.label} ${option.description ?? ""} ${option.value}`}
                   onSelect={() => {
                     onChange(option.value);
                     setOpen(false);
@@ -95,7 +96,14 @@ export function Combobox({
                     )}
                   />
                   {/* 宽到 42rem 还放不下就折行，不截断：截断会把区分项藏起来。 */}
-                  <span className="whitespace-normal">{option.label}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block whitespace-normal">{option.label}</span>
+                    {option.description ? (
+                      <span className="mt-0.5 block whitespace-normal text-xs text-muted-foreground">
+                        {option.description}
+                      </span>
+                    ) : null}
+                  </span>
                 </CommandItem>
               ))}
             </CommandGroup>

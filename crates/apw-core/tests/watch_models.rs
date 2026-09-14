@@ -36,6 +36,14 @@ fn 中文手表名称保留尺寸和固定规格() {
         .find(|p| p.part_number == "MEHY4CH/B")
         .unwrap();
     assert_eq!(se.title, "Apple Watch SE 3 40 毫米 铝金属 GPS 午夜色");
+    let series = products
+        .iter()
+        .find(|p| p.part_number == "MJK44CH/B")
+        .unwrap();
+    assert_eq!(
+        series.title,
+        "Apple Watch Series 12 42 毫米 铝金属 GPS + 蜂窝网络 浅金色"
+    );
 }
 
 fn selection(examples: serde_json::Value) -> Vec<apw_core::model::Product> {

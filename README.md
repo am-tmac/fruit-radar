@@ -1,6 +1,6 @@
 # 水果雷达（Fruit Radar）
 
-当前分支版本：**1.0.5**（手动开始 + 独立临时查询 profile 修正版）。版本号独立于上游；下方历史截图及上游安装说明不代表本分支已发布安装包。
+当前分支版本：**1.0.6-custom.1**（选择性移植上游 v1.0.6 展示改进，同时保留手动开始 + 独立临时查询 profile 修正）。版本号独立于上游；下方历史截图及上游安装说明不代表本分支已发布安装包。
 
 > **这是 [suversal/apple-store-inventory-monitor](https://github.com/suversal/apple-store-inventory-monitor)（果到雷达 v1.0.4）的修改分支，由 am-tmac 维护，不是上游官方版本。**
 >
@@ -9,6 +9,7 @@
 > - 修复监控列表在窄窗口下「最后检查 / Bark / 删除」三列被裁掉、无法删除监控的布局问题：内容宽度上限 1180→1360px、收紧门店与型号列宽、滚动区补上横向滚动条、窗口默认尺寸 1360×900、最小 1200×700
 > - 自绘应用图标（用户提供的「彩虹飘带苹果」logo，量化为干净硬边），源文件与处理流程见 `assets/README.md`，改动后跑 `pnpm tauri icon assets/app-icon.png` 重新生成整套
 > - 启动只初始化目标与间隔，恢复 `3d7c56e` 的手动开始行为，不读取自动恢复标记；保留初始化屏障与启停安全串行化。库存查询恢复 `3d7c56e` 的独立临时 profile 与请求链路，保留进程 RAII；自动加购去重、过期和结账保护；Bark 错误与活动日志脱敏及有界滚动。
+> - 选择性移植上游 v1.0.6 的已有送货说明/取货日期展示、Apple Watch 结构化型号名称、下拉说明搜索和设置保存结果反馈；不引入送货地区、表带组合或额外 Apple 请求。
 > - 关闭更新产物签名（`createUpdaterArtifacts: false`），更新端点指向本仓库
 >
 > 依据 GPL-3.0-or-later 发布，原始版权与许可声明（`LICENSE`、`NOTICE`）保留不变。
@@ -17,7 +18,7 @@
 
 果到雷达是一款 Apple 直营店取货库存监控工具。选好地区、门店和具体型号后，它会定时检查库存；检测到有货时，可以播放提示音、推送 Bark，并按你的选择打开 Apple 购物袋或商品详情。
 
-上游支持 macOS、Windows 和 Linux，使用 Rust、Tauri 2 和 React 编写。本 README 对应水果雷达 **1.0.5** 源码；上游英文应用名为 **Apple Store Inventory Monitor**，仓库名为 `apple-store-inventory-monitor`。
+上游支持 macOS、Windows 和 Linux，使用 Rust、Tauri 2 和 React 编写。本 README 对应水果雷达 **1.0.6-custom.1** 源码；上游英文应用名为 **Apple Store Inventory Monitor**，仓库名为 `apple-store-inventory-monitor`。
 
 基于 [ENCHIGO/apple-pickup-watcher v0.3.2](https://github.com/ENCHIGO/apple-pickup-watcher/tree/v0.3.2) 继续开发，按 GPL-3.0-or-later 发布。来源与修改记录见 [NOTICE](NOTICE)。
 
@@ -83,7 +84,7 @@ codesign --verify --deep --strict target/release/bundle/macos/水果雷达.app
 
 ## 安装
 
-以下为上游安装说明及历史版本记录。本分支 1.0.5 当前仅准备源码与本地 macOS 构建包，未据此发布 Release；不要把上游历史版本的签名问题等同于本分支。
+以下为上游安装说明及历史版本记录。本分支 1.0.6-custom.1 当前仅准备源码与本地 macOS 构建包，未据此发布 Release；不要把上游历史版本的签名问题等同于本分支。
 
 打开 [最新正式版本](https://github.com/suversal/apple-store-inventory-monitor/releases/latest)，在 **Assets** 中下载对应系统的安装包。每个版本的变化见 [更新记录](CHANGELOG.md)。
 
@@ -594,7 +595,7 @@ pnpm tauri build --no-sign
 
 产物位于 `target/release/bundle/`。自动更新包需要仓库维护者配置 `TAURI_SIGNING_PRIVATE_KEY`；私钥设置了密码时还要配置 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。没有私钥时不能生成可被现有客户端验证的更新签名。
 
-正式版本由 [Release 工作流](.github/workflows/release.yml) 构建，当前分支的标签格式为 `v1.0.5`（准备源码不等于创建标签或发布 Release）。发版前应确认 `package.json`、工作区 `Cargo.toml`、`src-tauri/tauri.conf.json` 与标签的版本一致。macOS 专用配置在 `src-tauri/tauri.macos.conf.json` 中启用 ad-hoc 签名；发布流水线会同时验证自动更新归档和 DMG 内的应用签名。
+正式版本由 [Release 工作流](.github/workflows/release.yml) 构建；当前分支版本为 `1.0.6-custom.1`，如发布对应标签应使用 `v1.0.6-custom.1`（准备源码不等于创建标签或发布 Release）。发版前应确认 `package.json`、工作区 `Cargo.toml`、`src-tauri/tauri.conf.json` 与标签的版本一致。macOS 专用配置在 `src-tauri/tauri.macos.conf.json` 中启用 ad-hoc 签名；发布流水线会同时验证自动更新归档和 DMG 内的应用签名。
 
 推送 `v*` 标签后，GitHub Actions 会生成 macOS、Windows 和 Linux 安装包，并先创建草稿 Release；确认四个平台全部成功后再公开发布，避免用户下载到缺少部分平台或 `latest.json` 尚未完整生成的版本。手动运行 `workflow_dispatch` 只生成 Actions 构建产物，不会创建公开 Release。
 

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import packageInfo from "../package.json";
 import {
   Activity,
   AlertTriangle,
@@ -101,7 +102,7 @@ import {
   targetKey,
 } from "@/lib/types";
 
-import { describeMonitorStatus } from "@/lib/monitorLog";
+import { describeDelivery, describeMonitorStatus, describePickupDate, type DeliveryTone } from "@/lib/monitorLog";
 import { compareNewestProducts, sortMonitorsNewestFirst } from "@/lib/productOrder";
 
 const TONE_CLASS: Record<StatusTone, string> = {
@@ -128,14 +129,18 @@ const TONE_DOT: Record<StatusTone, string> = {
 
 function StatusBadge({ availability, pickupDetails }: { availability: Availability; pickupDetails?: PickupDetails }) {
   const { label, tone, detail } = describeMonitorStatus({ availability, pickupDetails });
+  const pickupDate = availability.kind === "in_stock" ? describePickupDate(pickupDetails?.pickupQuote) : null;
   const badge = (
-    <Badge
-      variant="outline"
-      className={`h-7 min-w-20 justify-center gap-2 px-2.5 font-medium ${TONE_CLASS[tone]}`}
-    >
-      <span className={`size-1.5 rounded-full ${TONE_DOT[tone]}`} aria-hidden="true" />
-      {label}
-    </Badge>
+    <span className="inline-flex flex-col items-center gap-0.5">
+      <Badge
+        variant="outline"
+        className={`h-7 min-w-20 justify-center gap-2 px-2.5 font-medium ${TONE_CLASS[tone]}`}
+      >
+        <span className={`size-1.5 rounded-full ${TONE_DOT[tone]}`} aria-hidden="true" />
+        {label}
+      </Badge>
+      {pickupDate ? <span className="text-[10px] leading-3 text-in-stock tabular-nums">{pickupDate} 可取</span> : null}
+    </span>
   );
   if (!detail) return badge;
   return (
@@ -145,6 +150,30 @@ function StatusBadge({ availability, pickupDetails }: { availability: Availabili
       </TooltipTrigger>
       <TooltipContent className="max-w-90">{detail}</TooltipContent>
     </Tooltip>
+  );
+}
+
+const DELIVERY_CLASS: Record<DeliveryTone, string> = {
+  fast: "border-in-stock/30 bg-in-stock/12 text-in-stock",
+  soon: "border-primary/30 bg-primary/10 text-primary",
+  standard: "border-border bg-muted/35 text-foreground",
+  later: "border-border bg-muted/25 text-muted-foreground",
+  unavailable: "border-border bg-muted/35 text-muted-foreground",
+  unknown: "border-unknown/30 bg-unknown/10 text-unknown",
+};
+
+function DeliveryBadge({ pickupDetails, lastCheckedMs }: { pickupDetails?: PickupDetails; lastCheckedMs: number | null }) {
+  const delivery = describeDelivery(pickupDetails, lastCheckedMs);
+  if (!delivery) return <span className="text-xs text-muted-foreground/60">未返回</span>;
+  return (
+    <span
+      className={`inline-flex min-w-20 flex-col rounded-lg border px-2 py-1 ${DELIVERY_CLASS[delivery.tone]}`}
+      title={`Apple 预计送货：${delivery.detail}`}
+      aria-label={`预计送货 ${delivery.label}，${delivery.timing}。Apple 原始说明：${delivery.detail}`}
+    >
+      <span className="whitespace-nowrap text-xs font-semibold tabular-nums">{delivery.label}</span>
+      <span className="whitespace-nowrap text-[10px] leading-3 opacity-80">{delivery.timing}</span>
+    </span>
   );
 }
 
@@ -271,7 +300,11 @@ export default function App() {
       ui.products
         .filter((product) => product.category === ui.category)
         .sort(compareNewestProducts)
-        .map((product) => ({ value: product.partNumber, label: product.title })),
+        .map((product) => ({
+          value: product.partNumber,
+          label: product.title,
+          description: `${product.partNumber}${product.capacity ? ` · ${product.capacity}` : ""}${product.color ? ` · ${product.color}` : ""}`,
+        })),
     [ui.products, ui.category],
   );
 
@@ -365,7 +398,7 @@ export default function App() {
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <h1 className="truncate text-lg font-semibold tracking-[-0.02em]">
-                    水果雷达
+                    水果雷达 v{packageInfo.version}
                   </h1>
                   <Badge variant="outline" className="hidden border-primary/20 bg-primary/8 text-primary sm:inline-flex">
                     LIVE
@@ -606,12 +639,13 @@ export default function App() {
                 </div>
 
                 <ScrollArea className="min-h-0 flex-1">
-                  <Table>
+                  <Table className="min-w-[58rem]">
                     <TableHeader className="sticky top-0 z-10 bg-card/95">
                       <TableRow className="hover:bg-transparent">
-                        <TableHead className="w-28 px-4 text-xs text-muted-foreground">状态</TableHead>
+                        <TableHead className="w-28 px-4 text-xs text-muted-foreground">取货状态</TableHead>
                         <TableHead className="px-3 text-xs text-muted-foreground">门店</TableHead>
                         <TableHead className="px-3 text-xs text-muted-foreground">型号</TableHead>
+                        <TableHead className="w-28 px-3 text-xs text-muted-foreground">预计送货</TableHead>
                         <TableHead className="w-24 px-3 text-xs text-muted-foreground">最后检查</TableHead>
                         <TableHead className="w-24 px-2 text-xs text-muted-foreground">Bark</TableHead>
                         <TableHead className="w-14" />
@@ -620,7 +654,7 @@ export default function App() {
                     <TableBody>
                       {ui.rows.length === 0 ? (
                         <TableRow className="hover:bg-transparent">
-                          <TableCell colSpan={6} className="h-44 text-center">
+                          <TableCell colSpan={7} className="h-44 text-center">
                             <div className="mx-auto flex max-w-xs flex-col items-center">
                               <div className="mb-3 flex size-11 items-center justify-center rounded-2xl border border-border/60 bg-muted/35 text-muted-foreground">
                                 <Radar className="size-5" aria-hidden="true" />
@@ -647,6 +681,9 @@ export default function App() {
                               >
                                 {row.target.productName}
                               </button>
+                            </TableCell>
+                            <TableCell className="px-3">
+                              <DeliveryBadge pickupDetails={row.pickupDetails} lastCheckedMs={row.lastCheckedMs} />
                             </TableCell>
                             <TableCell className="px-3 font-mono text-xs tabular-nums text-muted-foreground">
                               {formatTime(row.lastCheckedMs)}

@@ -287,15 +287,17 @@ function enqueueSettingsWrite<T>(operation: () => Promise<T>): Promise<T> {
   return next;
 }
 
-export function saveSettings(patch: Partial<Settings>): Promise<void> {
+export function saveSettings(patch: Partial<Settings>): Promise<boolean> {
   return enqueueSettingsWrite(async () => {
     try {
       const saved = await invoke<Settings>("save_settings", {
         settings: { ...state.settings, ...patch },
       });
       update({ settings: saved });
+      return true;
     } catch (err) {
       pushLog(`保存设置失败：${String(err)}`);
+      return false;
     }
   });
 }

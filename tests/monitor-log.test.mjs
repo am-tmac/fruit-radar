@@ -1,6 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { describeCycleRow, describeCycleSummary, describeMonitorStatus } from "../src/lib/monitorLog.ts";
+import {
+  describeCycleRow,
+  describeCycleSummary,
+  describeDelivery,
+  describeMonitorStatus,
+  describePickupDate,
+} from "../src/lib/monitorLog.ts";
 const target = { storeTitle: "上海-南京东路", storeNumber: "R359", productName: "iPhone", partNumber: "MJTJ4CH/A", locale: "zh_CN" };
 const row = (availability, pickupDetails) => ({ target, availability, pickupDetails });
 const unavailable = {kind:"out_of_stock"};
@@ -39,4 +45,29 @@ test("Duo 即将发售与18 Pro暂未开售分别显示，日志保留原始区�
   assert.equal(pro.tone,"presale");
   assert.match(describeCycleRow(1,duo), /COMING_SOON.*暂无供应/);
   assert.equal(describeMonitorStatus(row({kind:"in_stock"},duo.pickupDetails)).label,"有货");
+});
+
+test("送货日期按 Apple 明确日期展示，不把周数范围伪造成日期", () => {
+  const checkedAt = new Date(2026, 8, 15, 12).getTime();
+  assert.deepEqual(describeDelivery({ saleMessage: "送货：2026/09/16 — 免费" }, checkedAt), {
+    label: "9/16",
+    timing: "明天",
+    tone: "fast",
+    detail: "送货：2026/09/16 — 免费",
+  });
+  assert.deepEqual(describeDelivery({ saleMessage: "2026/09/22 - 2026/09/25 — 免费" }, checkedAt), {
+    label: "9/22 – 9/25",
+    timing: "7 天后",
+    tone: "standard",
+    detail: "2026/09/22 - 2026/09/25 — 免费",
+  });
+  const range = describeDelivery({ saleMessage: "2–3 周" }, checkedAt);
+  assert.equal(range?.label, "2–3 周");
+  assert.equal(range?.tone, "unknown");
+});
+
+test("暂无送货与取货日期分开解释", () => {
+  assert.equal(describeDelivery({ saleMessage: "暂无供应" })?.tone, "unavailable");
+  assert.equal(describePickupDate("今天可取，2026/09/15"), "9/15");
+  assert.equal(describePickupDate("目前无货"), null);
 });
