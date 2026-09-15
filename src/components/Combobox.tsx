@@ -55,13 +55,15 @@ export function Combobox({
           role="combobox"
           aria-expanded={open}
           disabled={disabled}
-          className={cn("justify-between font-normal", className)}
+          // min-w-0：控件在「新建监控」的四列网格里，如果保留 grid 项目的自动最小尺寸
+          // （min-width:auto），长选中值会把控件顶得比自己的格子还宽，压到隔壁字段上。
+          className={cn("min-w-0 justify-between font-normal", open && "border-foreground", className)}
         >
           <span
             // 触发器宽度是固定的，选中项再长也只能截断；挂个原生 title，
             // 想确认自己选的到底是哪一台时鼠标悬停就能看全。
             title={selected?.label}
-            className={cn("truncate", !selected && "text-muted-foreground")}
+            className={cn("min-w-0 truncate", !selected && "text-muted-foreground")}
           >
             {selected ? selected.label : placeholder}
           </span>
@@ -73,7 +75,7 @@ export function Combobox({
         // 字（「MacBook Pro 16 英寸 M5 Max 芯片 18 核中央处理器、40 核图形处理器
         // 标准显示屏 深空黑色」），面板要是跟触发器一样宽，被截掉的正好是区分
         // 两台机器的那半句 —— 用户面对两条看起来一模一样的选项只能猜。
-        className="w-auto min-w-(--radix-popover-trigger-width) max-w-[min(90vw,42rem)] p-0"
+        className="w-auto min-w-(--radix-popover-trigger-width) max-w-[min(90vw,42rem)] rounded-[9px] border-hair-strong p-2 shadow-[0_18px_40px_-16px_rgb(20_20_25/0.22)]"
         align="start"
       >
         <Command>
@@ -99,7 +101,7 @@ export function Combobox({
                   <span className="min-w-0 flex-1">
                     <span className="block whitespace-normal">{option.label}</span>
                     {option.description ? (
-                      <span className="mt-0.5 block whitespace-normal text-xs text-muted-foreground">
+                      <span className="mt-0.5 block whitespace-normal text-[12.5px] text-muted-foreground/70">
                         {option.description}
                       </span>
                     ) : null}

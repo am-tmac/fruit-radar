@@ -3,67 +3,87 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/*
+ * 颜色只用来表达状态。
+ *
+ * 界面本体是墨色文字 + 两级发丝线，彩色只允许出现在库存状态点上（有货/无货/即将发售…）。
+ * 亮色取值来自设计稿 base.css；暗色按同一组色调关系推导：略微偏冷的近黑底、近白墨、
+ * 状态色提亮到能在深底上看清。
+ */
 :root {
-  --radius: 0.75rem;
-  --background: oklch(0.97 0.008 265);
-  --foreground: oklch(0.19 0.022 269);
-  --card: oklch(0.995 0.003 265);
-  --card-foreground: oklch(0.19 0.022 269);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.19 0.022 269);
-  --primary: oklch(0.58 0.19 265);
-  --primary-foreground: oklch(0.99 0 0);
-  --secondary: oklch(0.925 0.018 265);
-  --secondary-foreground: oklch(0.25 0.028 269);
-  --muted: oklch(0.94 0.012 265);
-  --muted-foreground: oklch(0.48 0.024 269);
-  --accent: oklch(0.92 0.026 265);
-  --accent-foreground: oklch(0.25 0.04 265);
-  --destructive: oklch(0.58 0.225 27);
-  --border: oklch(0.87 0.018 265);
-  --input: oklch(0.88 0.018 265);
-  --ring: oklch(0.58 0.19 265);
-  --in-stock: oklch(0.59 0.17 150);
+  --radius: 0.625rem;
+
+  --background: #ffffff;
+  --foreground: #17171a;
+  --card: #ffffff;
+  --card-foreground: #17171a;
+  --popover: #ffffff;
+  --popover-foreground: #17171a;
+
+  --primary: #17171a;
+  --primary-foreground: #ffffff;
+  --secondary: #f1f1ee;
+  --secondary-foreground: #17171a;
+  --muted: #f6f6f4;
+  /* 设计稿的 ink2：次级文字。更弱的 meta 文字用 text-muted-foreground/70（ink3）。 */
+  --muted-foreground: #5b5b64;
+  --accent: #f1f1ee;
+  --accent-foreground: #17171a;
+  --destructive: #c0252a;
+
+  --ring: rgb(23 23 26 / 0.32);
+
+  /* 两级发丝线：分隔线 9%，控件描边与表头下划线 15%。 */
+  --hair: rgb(23 23 26 / 0.09);
+  --hair-strong: rgb(23 23 26 / 0.15);
+  --border: var(--hair-strong);
+  --input: var(--hair-strong);
+
+  /* 浅灰底：导航选中态、计数标签、搜索框。 */
+
+  /* 状态色 —— 界面里唯一允许出现的彩色。 */
+  --in-stock: #157f3d;
   --unknown: oklch(0.62 0.2 35);
-  --out-of-stock: #a61b51;
+  --out-of-stock: #c0252a;
   --presale: #1d4ed8;
-  --coming-soon: #6d28d9;
+  --coming-soon: #9a5b06;
   --pickup-unsupported: #475569;
   --not-for-sale: #786000;
-  --panel-highlight: oklch(1 0 0 / 78%);
-  --panel-shadow: oklch(0.2 0.04 270 / 10%);
-  --canvas-glow: oklch(0.65 0.19 265 / 12%);
 }
 
 .dark {
-  --background: oklch(0.115 0.014 272);
-  --foreground: oklch(0.94 0.008 265);
-  --card: oklch(0.165 0.018 272);
-  --card-foreground: oklch(0.94 0.008 265);
-  --popover: oklch(0.205 0.02 272);
-  --popover-foreground: oklch(0.95 0.006 265);
-  --primary: oklch(0.7 0.17 264);
-  --primary-foreground: oklch(0.13 0.022 272);
-  --secondary: oklch(0.225 0.021 272);
-  --secondary-foreground: oklch(0.92 0.008 265);
-  --muted: oklch(0.215 0.017 272);
-  --muted-foreground: oklch(0.69 0.02 265);
-  --accent: oklch(0.25 0.035 267);
-  --accent-foreground: oklch(0.95 0.006 265);
+  --background: #101012;
+  --foreground: #efeff1;
+  --card: #17171a;
+  --card-foreground: #efeff1;
+  --popover: #1c1c20;
+  --popover-foreground: #f2f2f4;
+
+  --primary: #f2f2f4;
+  --primary-foreground: #17171a;
+  --secondary: #232327;
+  --secondary-foreground: #ededef;
+  --muted: #1e1e22;
+  --muted-foreground: #a0a0a9;
+  --accent: #26262b;
+  --accent-foreground: #f2f2f4;
   --destructive: oklch(0.68 0.19 25);
-  --border: oklch(0.31 0.021 272 / 72%);
-  --input: oklch(0.32 0.022 272 / 82%);
-  --ring: oklch(0.7 0.17 264);
-  --in-stock: oklch(0.76 0.18 150);
+
+  --ring: rgb(255 255 255 / 0.34);
+
+  --hair: rgb(255 255 255 / 0.09);
+  --hair-strong: rgb(255 255 255 / 0.15);
+  --border: var(--hair-strong);
+  --input: var(--hair-strong);
+
+
+  --in-stock: #4fbf77;
   --unknown: oklch(0.74 0.16 50);
-  --out-of-stock: #fb8fb1;
+  --out-of-stock: #f08a8e;
   --presale: #83b8ff;
-  --coming-soon: #c4a1ff;
-  --pickup-unsupported: #b0bac9;
-  --not-for-sale: #e6cc70;
-  --panel-highlight: oklch(0.205 0.02 272 / 92%);
-  --panel-shadow: oklch(0.03 0.02 272 / 40%);
-  --canvas-glow: oklch(0.5 0.17 270 / 13%);
+  --coming-soon: #e0a94e;
+  --pickup-unsupported: #a9b4c2;
+  --not-for-sale: #ddc069;
 }
 
 @theme inline {
@@ -89,6 +109,8 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --color-hair: var(--hair);
+  --color-hair-strong: var(--hair-strong);
   --color-in-stock: var(--in-stock);
   --color-unknown: var(--unknown);
   --color-out-of-stock: var(--out-of-stock);
@@ -113,9 +135,12 @@
 
   body {
     @apply bg-background text-foreground antialiased;
-    overflow-x: hidden;
+    /* 整个窗口自己管滚动：长列表、日志、设置各滚各的。 */
+    overflow: hidden;
     user-select: none;
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", Inter, system-ui, sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "PingFang SC", system-ui, sans-serif;
+    /* 轮次、秒数、时间、SKU 都靠等宽数字对齐，跳字会让整张表跟着抖。 */
+    font-variant-numeric: tabular-nums;
   }
 
   button,
@@ -131,64 +156,115 @@
 
 @layer components {
   .app-canvas {
-    background:
-      radial-gradient(circle at 12% -18%, var(--canvas-glow), transparent 34rem),
-      radial-gradient(circle at 92% 112%, color-mix(in oklch, var(--in-stock) 7%, transparent), transparent 30rem),
-      var(--background);
+    background: var(--background);
+  }
+
+  /* 面板：10px 圆角 + 一条发丝线。没有渐变、没有投影、没有主色描边。 */
+  .panel {
+    @apply rounded-[10px] border border-hair bg-card px-5 py-[18px];
   }
 
   .surface-panel {
-    border: 1px solid var(--border);
-    border-radius: 1rem;
-    background: linear-gradient(145deg, var(--panel-highlight), var(--card));
-    box-shadow: 0 18px 45px -30px var(--panel-shadow), inset 0 1px 0 color-mix(in oklch, var(--foreground) 5%, transparent);
+    @apply rounded-[10px] border border-hair bg-card;
   }
 
-  .brand-mark {
-    @apply flex size-10 shrink-0 items-center justify-center rounded-xl border border-primary/20 bg-primary/10 text-primary;
-    box-shadow: inset 0 1px 0 color-mix(in oklch, var(--foreground) 8%, transparent), 0 10px 24px -16px var(--primary);
+  /* 右栏的小面板：比主面板更紧的留白。 */
+  .rpanel {
+    @apply rounded-[10px] border border-hair bg-card px-[18px] py-4;
   }
 
-  .status-pill {
-    @apply flex h-10 items-center gap-2 rounded-xl border border-border/65 bg-background/35 px-3;
+  .panel-head {
+    @apply flex items-start justify-between gap-4;
   }
 
+  /* 分组标题：10.5px 全大写、字距 .11em、弱化墨色。 */
   .eyebrow {
-    @apply flex items-center gap-1.5 text-[11px] font-semibold tracking-[0.12em] text-primary uppercase;
+    @apply flex items-center gap-1.5 text-[10.5px] font-semibold tracking-[0.11em] text-muted-foreground/70 uppercase;
   }
 
-  .section-icon {
-    @apply flex size-8 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/45 text-muted-foreground;
+  .panel-title {
+    @apply text-[15px] font-semibold tracking-[-0.012em];
+  }
+
+  .panel-cap {
+    @apply text-[11px] font-semibold tracking-[0.11em] text-muted-foreground/70 uppercase;
+  }
+
+  /* 品牌标记：墨色圆角块 + 一个点，不用图标也不用图片。 */
+  .brand-mark {
+    @apply relative block size-[26px] shrink-0 rounded-[7px] bg-primary;
+  }
+
+  .brand-mark::after {
+    content: "";
+    @apply absolute top-1.5 right-1.5 size-[6px] rounded-full bg-primary-foreground;
+  }
+
+  .brand-mark::before {
+    content: "";
+    @apply absolute bottom-[5px] left-[5px] size-[6px] rounded-full border-[1.5px] border-primary-foreground opacity-45;
+  }
+
+  .rail-nav-item {
+    @apply flex items-center justify-between gap-2 rounded-[6px] px-2.5 py-2 text-left text-[13.5px] font-medium text-muted-foreground transition-colors;
+  }
+
+  .rail-nav-item:hover {
+    @apply bg-muted text-foreground;
+  }
+
+  .rail-nav-item[aria-current="page"] {
+    @apply bg-secondary font-semibold text-foreground;
+  }
+
+  .rail-nav-count {
+    @apply text-[11.5px] tabular-nums text-muted-foreground/70;
+  }
+
+  .ghost-button {
+    @apply flex h-9 w-full items-center justify-center gap-1.5 rounded-[7px] border border-hair-strong bg-transparent text-[13px] font-medium text-foreground transition-colors hover:bg-muted disabled:opacity-50;
   }
 
   .field-group {
-    @apply grid min-w-0 gap-1.5;
+    @apply grid min-w-0 gap-2;
   }
 
   .control-label {
-    @apply flex h-5 items-center gap-1.5 text-xs font-medium text-muted-foreground;
+    @apply flex h-4 items-center gap-1.5 text-[10.5px] font-semibold tracking-[0.09em] text-muted-foreground/70;
   }
 
   .control-surface {
-    @apply h-10 rounded-xl border-border/70 bg-background/40 px-3 shadow-none transition-colors hover:border-primary/35 hover:bg-background/60 focus-visible:border-primary/60;
+    @apply h-9 rounded-[7px] border-hair-strong bg-card px-3 text-[13.5px] shadow-none transition-colors hover:border-foreground/25 focus-visible:border-foreground focus-visible:ring-0;
   }
 
-  .metric-tile {
-    @apply grid min-w-0 grid-cols-[auto_1fr] items-center gap-x-2 rounded-2xl border border-border/70 bg-card px-3.5 py-3 shadow-sm;
+  /* 表格：无竖线，行分隔用发丝线，表头下划线用更重的那一级。 */
+  .data-table th {
+    @apply border-b border-hair-strong pb-2.5;
   }
 
-  .metric-value {
-    @apply text-right text-xl font-semibold tracking-tight tabular-nums;
+  .data-table td {
+    @apply border-b border-hair align-middle;
   }
 
-  .metric-label {
-    @apply col-span-2 mt-1 text-[11px] text-muted-foreground;
+  .data-table tbody tr:last-child td {
+    border-bottom-width: 0;
+  }
+
+  .stat-value {
+    @apply block text-[26px] leading-none font-semibold tracking-[-0.03em] tabular-nums;
+  }
+
+  .stat-label {
+    @apply mt-[7px] block text-[10.5px] font-semibold tracking-[0.1em] text-muted-foreground/70 uppercase;
+  }
+
+  .summary-row {
+    @apply flex items-center justify-between gap-3 border-b border-hair py-2.5 text-[13px] last:border-b-0 last:pb-0;
   }
 
   .setting-row {
-    @apply flex min-h-10 items-center justify-between rounded-lg px-2.5 transition-colors hover:bg-muted/45;
+    @apply flex min-h-10 items-center justify-between gap-3 border-b border-hair py-2 last:border-b-0;
   }
-
 }
 
 @media (prefers-reduced-motion: reduce) {

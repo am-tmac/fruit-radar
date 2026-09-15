@@ -86,11 +86,13 @@ export function MultiCombobox({
           variant="outline"
           aria-label={`${placeholder}，${selectedOptions.length === 0 ? "尚未选择" : triggerText}`}
           disabled={disabled}
-          className={cn("justify-between font-normal", className)}
+          // min-w-0：同 Combobox —— 不放开自动最小尺寸，长门店名会把控件顶出格子。
+          // 完整选中值仍然留在 aria-label 与 title 上，截断只影响视觉宽度。
+          className={cn("min-w-0 justify-between font-normal", open && "border-foreground", className)}
         >
           <span
             title={selectedTitle || undefined}
-            className={cn("truncate", selectedOptions.length === 0 && "text-muted-foreground")}
+            className={cn("min-w-0 truncate", selectedOptions.length === 0 && "text-muted-foreground")}
           >
             {triggerText}
           </span>
@@ -99,22 +101,22 @@ export function MultiCombobox({
       </PopoverTrigger>
 
       <PopoverContent
-        className="w-auto min-w-(--radix-popover-trigger-width) max-w-[min(94vw,60rem)] p-0"
+        className="w-auto min-w-(--radix-popover-trigger-width) max-w-[min(94vw,60rem)] rounded-[9px] border-hair-strong p-2 shadow-[0_18px_40px_-16px_rgb(20_20_25/0.22)]"
         align="start"
       >
-        <div className="flex items-center gap-2 rounded-t-md border-b px-3 focus-within:ring-2 focus-within:ring-ring/50 focus-within:ring-inset">
-          <Search className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+        <div className="flex h-[34px] items-center gap-2.5 rounded-[6px] bg-muted px-2.5 focus-within:ring-2 focus-within:ring-ring/40 focus-within:ring-inset">
+          <Search className="size-3.5 shrink-0 text-muted-foreground/70" aria-hidden="true" />
           <Input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder={searchPlaceholder}
             aria-label={searchPlaceholder.replace("…", "")}
-            className="h-10 border-0 px-0 shadow-none focus-visible:ring-0"
+            className="h-[34px] border-0 px-0 text-[13.5px] shadow-none focus-visible:ring-0"
           />
         </div>
 
-        <div className="flex min-h-10 items-center justify-between gap-3 border-b px-3 py-1.5">
-          <span className="text-xs text-muted-foreground" aria-live="polite">
+        <div className="flex items-center justify-between gap-3 px-1.5 py-1.5">
+          <span className="text-[11.5px] text-muted-foreground/70" aria-live="polite">
             已选 {selectedOptions.length} / {options.length}
           </span>
           <div className="flex items-center gap-1">
@@ -144,7 +146,7 @@ export function MultiCombobox({
           aria-label={placeholder}
         >
           {filtered.length === 0 ? (
-            <div className="py-6 text-center text-sm">{emptyText}</div>
+            <div className="py-6 text-center text-[13.5px] text-muted-foreground">{emptyText}</div>
           ) : (
             filtered.map((option, index) => {
               const optionId = `${id}-${index}`;
@@ -152,7 +154,7 @@ export function MultiCombobox({
                 <label
                   key={option.value}
                   htmlFor={optionId}
-                  className="flex min-h-10 cursor-pointer items-center gap-2 rounded-sm px-2 py-2 text-sm hover:bg-accent focus-within:bg-accent"
+                  className="flex min-h-10 cursor-pointer items-center gap-2.5 rounded-[6px] px-2 py-2 text-[13.5px] hover:bg-muted focus-within:bg-muted"
                 >
                   <Checkbox
                     id={optionId}
@@ -162,7 +164,7 @@ export function MultiCombobox({
                   <span className="min-w-0 flex-1">
                     <span className="block whitespace-normal leading-5">{option.label}</span>
                     {option.description ? (
-                      <span className="mt-0.5 block whitespace-normal text-xs leading-4 text-muted-foreground">
+                      <span className="mt-0.5 block whitespace-normal text-[12.5px] leading-4 text-muted-foreground/70">
                         {option.description}
                       </span>
                     ) : null}
@@ -172,6 +174,12 @@ export function MultiCombobox({
             })
           )}
         </fieldset>
+
+        {query.trim() === "" ? null : (
+          <div className="mt-1 border-t border-hair px-2.5 pt-2 pb-1 text-[11.5px] text-muted-foreground/70">
+            共 {filtered.length} {selectionUnit}匹配「{query.trim()}」· 说明文字也会参与搜索
+          </div>
+        )}
       </PopoverContent>
     </Popover>
   );
