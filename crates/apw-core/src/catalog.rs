@@ -283,6 +283,36 @@ impl Catalog {
             .find(|p| p.part_number == part)
     }
 
+    /// 按当前目录修复已保存的 Watch 展示名，并补齐默认表带和整表套件号。
+    ///
+    /// 旧目标会把当时生成的 `product_name` 一起落盘。解析规则后来补上材质等
+    /// 维度时，不能因为它已经有表带就提前跳过，否则列表会永久显示残缺名称。
+    pub fn hydrate_watch_targets(&self, targets: &mut [crate::model::Target]) {
+        let mut by_locale: HashMap<String, Option<Vec<Product>>> = HashMap::new();
+        for target in targets {
+            let products = by_locale
+                .entry(target.locale.clone())
+                .or_insert_with(|| self.products(&target.locale).ok());
+            let Some(products) = products else { continue };
+            let Some(product) = products
+                .iter()
+                .find(|product| product.part_number == target.part_number)
+            else {
+                continue;
+            };
+            if product.category != Category::Watch {
+                continue;
+            }
+            target.product_name = product.title.clone();
+            if target.companion_part.is_none() {
+                target.companion_part = product.companion_part.clone();
+            }
+            if target.kit_part.is_none() {
+                target.kit_part = product.kit_part.clone();
+            }
+        }
+    }
+
     /// 按门店编号查门店，语义同 [`Catalog::product_by_part`]。
     pub fn store_by_number(&self, locale: &str, number: &str) -> Option<Store> {
         self.stores(locale)
@@ -664,6 +694,9 @@ mod tests {
             capacity: "256GB".to_string(),
             color: "黑色".to_string(),
             title: title.to_string(),
+            companion_part: None,
+            kit_part: None,
+            watch_case_size: None,
         }
     }
 
@@ -966,5 +999,28 @@ mod tests {
         assert!(after.iter().any(|p| p.category == Category::Mac));
         catalog.set_current_families("zh_CN", Category::Iphone, &[]);
         assert_eq!(after, catalog.products("zh_CN").unwrap());
+    }
+
+    #[test]
+    fn 已有表带的旧watch目标也会恢复完整材质名称() {
+        let catalog = Catalog::new();
+        let mut targets = vec![crate::model::Target {
+            locale: "zh_CN".into(),
+            store_number: "R683".into(),
+            store_title: "上海-环球港".into(),
+            part_number: "MJK44CH/B".into(),
+            product_name: "Series 12 42mm GPS + 蜂窝网络 浅金色".into(),
+            companion_part: Some("MJUY4FE/A".into()),
+            companion_name: None,
+            kit_part: Some("Z0YQ".into()),
+        }];
+
+        catalog.hydrate_watch_targets(&mut targets);
+
+        assert_eq!(
+            targets[0].product_name,
+            "Apple Watch Series 12 42 毫米 铝金属 GPS + 蜂窝网络 浅金色"
+        );
+        assert_eq!(targets[0].companion_part.as_deref(), Some("MJUY4FE/A"));
     }
 }

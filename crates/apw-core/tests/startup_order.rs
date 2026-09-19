@@ -1,12 +1,13 @@
 //! Offline differential probe: real Watcher, recording-only Fetcher, no network/config.
 use std::{collections::BTreeMap, sync::{Arc, Mutex}, time::Duration};
-use apw_core::{apple::{ApiError, Fetcher, PartStatus, StoreAvailability}, model::{Availability, Region, Target}, watcher::{Event, Watcher, WatcherConfig}};
+use apw_core::{apple::{ApiError, Fetcher, PartStatus, StoreAvailability}, model::{Availability, DeliveryRegion, Region, Target}, watcher::{Event, Watcher, WatcherConfig}};
 
 #[derive(Clone, Default)]
 struct RecordingFetcher(Arc<Mutex<Vec<(String, String, Vec<String>)>>>);
 impl Fetcher for RecordingFetcher {
-    async fn pickup_message(&self, region: &'static Region, store: &str, parts: &[String]) -> Result<StoreAvailability, ApiError> {
-        self.0.lock().unwrap().push((region.locale.into(), store.into(), parts.to_vec()));
+    async fn pickup_message(&self, region: &'static Region, store: &str, targets: &[Target], _delivery_region: Option<&DeliveryRegion>) -> Result<StoreAvailability, ApiError> {
+        let parts: Vec<String> = targets.iter().map(|t| t.part_number.clone()).collect();
+        self.0.lock().unwrap().push((region.locale.into(), store.into(), parts.clone()));
         Ok(StoreAvailability { store_number: store.into(), store_name: "Offline".into(), parts: parts.iter().map(|p| (p.clone(), PartStatus { part_number: p.clone(), availability: Availability::InStock, product_title: None, pickup_display: "available".into(), pickup_details: None })).collect::<BTreeMap<_, _>>() })
     }
 }
@@ -14,7 +15,7 @@ impl Fetcher for RecordingFetcher {
 async fn probe(auto_start: bool) -> (Vec<(String, String, Vec<String>)>, Vec<String>) {
     let fetcher = RecordingFetcher::default();
     let (watcher, mut events) = Watcher::spawn(fetcher.clone(), WatcherConfig { interval: Duration::from_secs(3600), jitter: 0.0, ..Default::default() });
-    watcher.set_targets(["TEST-B/A", "TEST-A/A"].into_iter().map(|part| Target { locale: "zh_CN".into(), store_number: "R390".into(), store_title: "Offline".into(), part_number: part.into(), product_name: "Offline".into() }).collect()).await;
+    watcher.set_targets(["TEST-B/A", "TEST-A/A"].into_iter().map(|part| Target { locale: "zh_CN".into(), store_number: "R390".into(), store_title: "Offline".into(), part_number: part.into(), product_name: "Offline".into(), companion_part: None, companion_name: None, kit_part: None }).collect()).await;
     watcher.set_interval(Duration::from_secs(3600)).await;
     assert!(!watcher.is_running().await); // actor barrier, no wall-clock sleep
     assert!(fetcher.0.lock().unwrap().is_empty());

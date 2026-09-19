@@ -16,7 +16,7 @@ use apw_core::config::{MIN_INTERVAL_SECONDS, OpenOnHit, Settings, SettingsStore}
 use apw_core::model::{Category, Product, REGIONS, Store, Target, region_by_locale};
 use apw_core::notify::{Bark, Multi, Notification, Notifier, Sound};
 use apw_core::watcher::{Event, TargetState, Watcher, WatcherConfig};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
@@ -41,6 +41,200 @@ const NOTICE_CHANNEL: &str = "watcher://notice";
 struct RegionDto {
     title: &'static str,
     locale: &'static str,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct DeliveryLocalityOption {
+    text: String,
+    value: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeliveryLocalitiesDto {
+    states: Vec<DeliveryLocalityOption>,
+    cities: Vec<DeliveryLocalityOption>,
+    districts: Vec<DeliveryLocalityOption>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct WatchBandChoiceDto {
+    style_key: String,
+    style_name: String,
+    color_key: String,
+    color_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct WatchBandSizeDto {
+    part_number: String,
+    text: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct DeliveryLocalityField {
+    #[serde(default)]
+    data: Vec<DeliveryLocalityOption>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct DeliveryLocalityBody {
+    #[serde(default)]
+    state: DeliveryLocalityField,
+    #[serde(default)]
+    city: DeliveryLocalityField,
+    #[serde(default)]
+    district: DeliveryLocalityField,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeliveryLocalityResponse {
+    body: DeliveryLocalityBody,
+}
+
+fn usable_localities(field: DeliveryLocalityField) -> Vec<DeliveryLocalityOption> {
+    field
+        .data
+        .into_iter()
+        .filter(|option| !option.value.trim().is_empty())
+        .collect()
+}
+
+fn parse_delivery_localities(body: &[u8]) -> Result<DeliveryLocalitiesDto, serde_json::Error> {
+    let parsed: DeliveryLocalityResponse = serde_json::from_slice(body)?;
+    Ok(DeliveryLocalitiesDto {
+        states: usable_localities(parsed.body.state),
+        cities: usable_localities(parsed.body.city),
+        districts: usable_localities(parsed.body.district),
+    })
+}
+
+fn plain_text(html: &str) -> String {
+    let mut text = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                text.push(' ');
+            }
+            _ if !in_tag => text.push(ch),
+            _ => {}
+        }
+    }
+    text.replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn parse_watch_band_choices(body: &[u8]) -> Result<Vec<WatchBandChoiceDto>, String> {
+    let value: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|error| format!("Apple 表带响应不是 JSON：{error}"))?;
+    let items = value
+        .pointer("/body/items")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "Apple 表带响应缺少 body.items".to_string())?;
+    let mut choices = Vec::new();
+    for (style_key, style) in items {
+        let style_name = plain_text(
+            style
+                .get("sectionHeader")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(style_key),
+        );
+        let style_order = style
+            .get("sortOrder")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(i64::MAX);
+        let Some(colors) = style
+            .get("subDimensionValue")
+            .and_then(serde_json::Value::as_array)
+        else {
+            continue;
+        };
+        for color in colors {
+            let Some(color_key) = color
+                .get("dimensionValue")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            let color_name = color
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .map(plain_text)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| color_key.to_string());
+            let color_order = color
+                .get("sortOrder")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(i64::MAX);
+            choices.push((
+                style_order,
+                color_order,
+                WatchBandChoiceDto {
+                    style_key: style_key.clone(),
+                    style_name: style_name.clone(),
+                    color_key: color_key.to_string(),
+                    color_name,
+                },
+            ));
+        }
+    }
+    choices.sort_by_key(|(style_order, color_order, choice)| {
+        (
+            *style_order,
+            *color_order,
+            choice.style_key.clone(),
+            choice.color_key.clone(),
+        )
+    });
+    Ok(choices.into_iter().map(|(_, _, choice)| choice).collect())
+}
+
+fn parse_watch_band_sizes(body: &[u8]) -> Result<Vec<WatchBandSizeDto>, String> {
+    let value: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|error| format!("Apple 表带尺码响应不是 JSON：{error}"))?;
+    let options = value
+        .pointer("/body/options")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "Apple 表带尺码响应缺少 body.options".to_string())?;
+    let mut sizes = Vec::new();
+    for option in options {
+        let Some(part_number) = option
+            .pointer("/product/options/watch_bands")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| value.contains('/'))
+        else {
+            continue;
+        };
+        let text = option
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .map(plain_text)
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                option
+                    .get("key")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| part_number.to_string());
+        sizes.push(WatchBandSizeDto {
+            part_number: part_number.to_string(),
+            text,
+        });
+    }
+    Ok(sizes)
 }
 
 /// 品类的可序列化形式。
@@ -118,6 +312,180 @@ fn list_categories() -> Vec<CategoryDto> {
         .collect()
 }
 
+/// 读取 Apple 官网“送货选项”使用的省、市、区三级联动数据。
+///
+/// 中国大陆官网当前明确返回三个 select；其他地区多为邮编或定位输入，不能硬套
+/// 省市区模型，因此先拒绝而不是给用户一组看似可选、实际查询无效的值。
+#[tauri::command]
+async fn list_delivery_localities(
+    state: tauri::State<'_, AppState>,
+    locale: String,
+    state_name: String,
+    city_name: String,
+) -> Result<DeliveryLocalitiesDto, String> {
+    if locale != "zh_CN" {
+        return Err("Apple 官网当前仅在中国大陆站提供省、市、区三级选择".into());
+    }
+    let region = region_by_locale(&locale).ok_or_else(|| format!("认不出地区 {locale}"))?;
+    let mut query = vec![("fae", "true")];
+    let state_name = state_name.trim();
+    let city_name = city_name.trim();
+    if !state_name.is_empty() {
+        query.push(("state", state_name));
+    }
+    if !city_name.is_empty() {
+        query.push(("city", city_name));
+    }
+
+    let response = state
+        .http
+        .get(format!("{}/shop/address/locality-lookup", region.base_url))
+        .query(&query)
+        .timeout(Duration::from_secs(20))
+        .header(
+            reqwest::header::ACCEPT,
+            "application/json, text/javascript, */*; q=0.01",
+        )
+        .header(reqwest::header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9")
+        .header("X-Requested-With", "XMLHttpRequest")
+        .send()
+        .await
+        .map_err(|error| format!("读取 Apple 送货地区失败：{error}"))?;
+    let status = response.status();
+    let body = response
+        .bytes()
+        .await
+        .map_err(|error| format!("读取 Apple 送货地区响应失败：{error}"))?;
+    if !status.is_success() {
+        return Err(format!("Apple 送货地区接口返回 HTTP {}", status.as_u16()));
+    }
+    if body.len() > 512 * 1024 {
+        return Err("Apple 送货地区响应超过 512 KiB 安全上限".into());
+    }
+    parse_delivery_localities(&body).map_err(|error| format!("Apple 送货地区响应无法解析：{error}"))
+}
+
+fn watch_band_product(state: &AppState, locale: &str, case_part: &str) -> Result<Product, String> {
+    let mut product = state
+        .catalog
+        .product_by_part(locale, case_part)
+        .ok_or_else(|| format!("型号目录中找不到 Apple Watch 表壳 {case_part}"))?;
+    if product.category != Category::Watch {
+        return Err(format!("{case_part} 不是 Apple Watch 表壳"));
+    }
+    if product.kit_part.as_deref().is_none_or(str::is_empty) {
+        return Err("这条 Apple Watch 型号缺少整表套件号，请先刷新型号目录".into());
+    }
+    if product.watch_case_size.as_deref().is_none_or(str::is_empty) {
+        let words: Vec<_> = product.title.split_whitespace().collect();
+        product.watch_case_size = words.windows(2).find_map(|pair| {
+            (pair[1] == "毫米" && pair[0].chars().all(|ch| ch.is_ascii_digit()))
+                .then(|| format!("{}mm", pair[0]))
+        });
+    }
+    if product.watch_case_size.as_deref().is_none_or(str::is_empty) {
+        return Err("这条 Apple Watch 型号缺少表壳尺寸，请先刷新型号目录".into());
+    }
+    Ok(product)
+}
+
+async fn fetch_watch_band_api(
+    state: &AppState,
+    url: reqwest::Url,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    let response = state
+        .http
+        .get(url)
+        .timeout(Duration::from_secs(20))
+        .header(
+            reqwest::header::ACCEPT,
+            "application/json, text/javascript, */*; q=0.01",
+        )
+        .header(reqwest::header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9")
+        .header("X-Requested-With", "XMLHttpRequest")
+        .send()
+        .await
+        .map_err(|error| format!("读取 Apple {label}失败：{error}"))?;
+    let status = response.status();
+    let body = response
+        .bytes()
+        .await
+        .map_err(|error| format!("读取 Apple {label}响应失败：{error}"))?;
+    if !status.is_success() {
+        return Err(format!("Apple {label}接口返回 HTTP {}", status.as_u16()));
+    }
+    if body.len() > 2 * 1024 * 1024 {
+        return Err(format!("Apple {label}响应超过 2 MiB 安全上限"));
+    }
+    Ok(body.to_vec())
+}
+
+/// 按表壳读取 Apple 官网当前允许搭配的表带款式和颜色。
+#[tauri::command]
+async fn list_watch_band_choices(
+    state: tauri::State<'_, AppState>,
+    locale: String,
+    case_part: String,
+) -> Result<Vec<WatchBandChoiceDto>, String> {
+    if locale != "zh_CN" {
+        return Err("Apple Watch 精确送货表带选择目前仅支持中国大陆站".into());
+    }
+    let region = region_by_locale(&locale).ok_or_else(|| format!("认不出地区 {locale}"))?;
+    let product = watch_band_product(&state, &locale, &case_part)?;
+    let kit = product
+        .kit_part
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let case_size = product.watch_case_size.as_deref().unwrap_or_default();
+    let mut url = reqwest::Url::parse(&format!("{}/shop/api/band-selection", region.base_url))
+        .map_err(|error| format!("无法构造 Apple 表带接口：{error}"))?;
+    url.query_pairs_mut()
+        .append_pair("fae", "true")
+        .append_pair("product", &kit)
+        .append_pair("option.watch_cases", &product.part_number)
+        .append_pair("dm.watch_cases-dimensionCaseSize", case_size);
+    let body = fetch_watch_band_api(&state, url, "表带选项").await?;
+    parse_watch_band_choices(&body)
+}
+
+/// 读取某一款式、颜色下的尺码；每个选项直接携带查询送货所需的表带零件号。
+#[tauri::command]
+async fn list_watch_band_sizes(
+    state: tauri::State<'_, AppState>,
+    locale: String,
+    case_part: String,
+    style_key: String,
+    color_key: String,
+) -> Result<Vec<WatchBandSizeDto>, String> {
+    if locale != "zh_CN" {
+        return Err("Apple Watch 精确送货表带选择目前仅支持中国大陆站".into());
+    }
+    if style_key.len() > 80 || color_key.len() > 80 {
+        return Err("Apple 表带选项值过长".into());
+    }
+    let region = region_by_locale(&locale).ok_or_else(|| format!("认不出地区 {locale}"))?;
+    let product = watch_band_product(&state, &locale, &case_part)?;
+    let kit = product
+        .kit_part
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let case_size = product.watch_case_size.as_deref().unwrap_or_default();
+    let mut url = reqwest::Url::parse(&format!("{}/shop/api/band_sizes", region.base_url))
+        .map_err(|error| format!("无法构造 Apple 表带尺码接口：{error}"))?;
+    url.query_pairs_mut()
+        .append_pair("fae", "true")
+        .append_pair("product", &kit)
+        .append_pair("option.watch_cases", &product.part_number)
+        .append_pair("dm.watch_bands-dimensionBandStyle", style_key.trim())
+        .append_pair("dm.watch_bands-dimensionColor", color_key.trim())
+        .append_pair("dm.watch_cases-dimensionCaseSize", case_size);
+    let body = fetch_watch_band_api(&state, url, "表带尺码").await?;
+    parse_watch_band_sizes(&body)
+}
+
 #[tauri::command]
 fn list_stores(state: tauri::State<'_, AppState>, locale: String) -> Result<Vec<Store>, String> {
     state.catalog.stores(&locale).map_err(|e| e.to_string())
@@ -159,11 +527,22 @@ async fn refresh_products(
     category: Option<Category>,
 ) -> Result<usize, String> {
     let region = region_by_locale(&locale).ok_or_else(|| format!("认不出地区 {locale}"))?;
-    state
+    let count = state
         .catalog
         .refresh_products(region, category, &state.http)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // 目录更新后同步修复已有 Watch 目标的展示元数据。目标键只由地区、门店和
+    // 零件号决定，因此这里不会增加、删除或换掉用户正在监控的 SKU。
+    let mut next = state.settings_snapshot();
+    let before = next.targets.clone();
+    state.catalog.hydrate_watch_targets(&mut next.targets);
+    if next.targets != before {
+        state.watcher.set_targets(next.targets.clone()).await;
+        state.put_settings(next)?;
+    }
+    Ok(count)
 }
 
 #[tauri::command]
@@ -180,10 +559,15 @@ async fn save_settings(
     state.admission.lock().unwrap().cancel();
     let mut next = settings;
     next.normalize();
+    state.catalog.hydrate_watch_targets(&mut next.targets);
 
     // 设置里的目标列表和查询间隔要同步给引擎，否则改完设置监控还按旧的跑。
     state.watcher.set_targets(next.targets.clone()).await;
     state.watcher.set_interval(next.interval()).await;
+    state
+        .watcher
+        .set_delivery_region(next.delivery_region.clone())
+        .await;
 
     state.put_settings(next.clone())?;
     Ok(next)
@@ -204,6 +588,7 @@ async fn set_targets(
     let mut next = state.settings_snapshot();
     next.targets = targets;
     next.normalize();
+    state.catalog.hydrate_watch_targets(&mut next.targets);
     state.watcher.set_targets(next.targets.clone()).await;
     state.put_settings(next)?;
     Ok(state.watcher.snapshot().await)
@@ -243,6 +628,11 @@ fn remember_running(running: bool) {
     if let Ok(path) = apw_core::config::resume_state_path() {
         let _ = apw_core::resume::write(&path, running);
     }
+}
+
+#[tauri::command]
+async fn retry_watching_now(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    Ok(state.watcher.retry_now().await)
 }
 
 #[tauri::command]
@@ -733,6 +1123,28 @@ async fn dispatch_notification(
     channels.notify(&notification).await
 }
 
+fn in_stock_notification_body(target: &Target) -> String {
+    let mut body = format!("{} {}", target.store_title, target.product_name);
+    if let Some(companion) = target
+        .companion_part
+        .as_deref()
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        let label = target
+            .companion_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty());
+        if let Some(label) = label {
+            body.push_str(&format!("\nWatch 送货表带 {label} [{companion}]"));
+        } else {
+            body.push_str(&format!("\nWatch 送货搭配表带 {companion}"));
+        }
+    }
+    body
+}
+
 /// 消费引擎事件：转发给前端，并在有货时发提醒。
 async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Event>) {
     while let Some(event) = events.recv().await {
@@ -749,10 +1161,7 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
             let destination_url = target_open_url(&app, target, settings.open_on_hit);
             let bark_url = settings.bark_url_for(target).to_owned();
             let has_product_bark = settings.product_bark_urls.contains_key(&target.part_number);
-            let mut notification = Notification::new(
-                "有货了",
-                format!("{} {}", target.store_title, target.product_name),
-            );
+            let mut notification = Notification::new("有货了", in_stock_notification_body(target));
             if let Some(url) = &destination_url {
                 notification = notification.with_url(url.clone());
             }
@@ -974,14 +1383,29 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let mut notices = Vec::new();
-            let (settings, store) = load_settings(&mut notices);
+            let (mut settings, store) = load_settings(&mut notices);
+            let catalog = Catalog::new();
+            let saved_targets = settings.targets.clone();
+            catalog.hydrate_watch_targets(&mut settings.targets);
+            if settings.targets != saved_targets
+                && let Some(store) = store.as_ref()
+                && let Err(error) = store.save(&settings)
+            {
+                notices.push(format!(
+                    "Watch 型号名称已在本次运行修复，但暂时无法保存：{error}"
+                ));
+            }
 
             // 用 Watcher::new 而不是 Watcher::spawn：setup 回调跑在主线程上，
             // 并不处在 tokio 运行时上下文里，在这里 tokio::spawn 会 panic，
             // 而且因为发生在不可展开的回调中，进程会直接 abort。
             // 引擎任务交给 Tauri 自己的运行时去驱动。
+            let watcher_config = WatcherConfig {
+                delivery_region: settings.delivery_region.clone(),
+                ..WatcherConfig::default()
+            };
             let (watcher, events, engine) =
-                Watcher::new(AppleChromiumFetcher::new(), WatcherConfig::default());
+                Watcher::new(AppleChromiumFetcher::new(), watcher_config);
             tauri::async_runtime::spawn(engine);
 
             {
@@ -1003,7 +1427,7 @@ pub fn run() {
                 admission: std::sync::Mutex::new(automation::Admission::default()),
                 order_watch: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 orders: std::sync::Mutex::new(std::collections::HashSet::new()),
-                catalog: Catalog::new(),
+                catalog,
                 http: reqwest::Client::new(),
                 settings: RwLock::new(settings),
                 store,
@@ -1041,6 +1465,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_regions,
             list_categories,
+            list_delivery_localities,
+            list_watch_band_choices,
+            list_watch_band_sizes,
             list_stores,
             list_products,
             refresh_products,
@@ -1051,6 +1478,7 @@ pub fn run() {
             set_interval,
             start_watching,
             stop_watching,
+            retry_watching_now,
             is_running,
             test_notify,
             open_target_product,
@@ -1064,4 +1492,61 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        in_stock_notification_body, parse_delivery_localities, parse_watch_band_choices,
+        parse_watch_band_sizes,
+    };
+    use apw_core::model::Target;
+
+    #[test]
+    fn apple地区响应过滤占位项并保留三级选项() {
+        let response = r#"{
+          "body": {
+            "state": {"data":[{"text":"省份","value":""},{"text":"江苏","value":"江苏"}]},
+            "city": {"data":[{"text":"城镇/城市","value":""},{"text":"苏州","value":"苏州"}]},
+            "district": {"data":[{"text":"区","value":""},{"text":"吴江区","value":"吴江区"}]}
+          }
+        }"#;
+        let parsed =
+            parse_delivery_localities(response.as_bytes()).expect("应当解析 Apple 地区响应");
+        assert_eq!(parsed.states[0].value, "江苏");
+        assert_eq!(parsed.cities[0].value, "苏州");
+        assert_eq!(parsed.districts[0].value, "吴江区");
+        assert_eq!(parsed.states.len(), 1);
+    }
+
+    #[test]
+    fn watch到货提醒明确标出送货查询使用的表带() {
+        let target = Target {
+            locale: "zh_CN".into(),
+            store_number: "R390".into(),
+            store_title: "上海-香港广场".into(),
+            part_number: "MJCX4CH/B".into(),
+            product_name: "Apple Watch Ultra 4 49 毫米 黑色".into(),
+            companion_part: Some("MKDY4FE/A".into()),
+            companion_name: None,
+            kit_part: Some("Z0YQ".into()),
+        };
+        let body = in_stock_notification_body(&target);
+        assert!(body.contains("Apple Watch Ultra 4"));
+        assert!(body.contains("Watch 送货搭配表带 MKDY4FE/A"));
+    }
+
+    #[test]
+    fn apple表带接口保留官网款式颜色和精确尺码零件号() {
+        let choices = r#"{"body":{"items":{"sololoop":{"sortOrder":20,"sectionHeader":"<span>新配色</span> 单圈表带","subDimensionValue":[{"dimensionValue":"burgundy","text":"勃艮第酒红色","sortOrder":10}]}}}}"#;
+        let parsed = parse_watch_band_choices(choices.as_bytes()).expect("应当解析表带选项");
+        assert_eq!(parsed[0].style_key, "sololoop");
+        assert_eq!(parsed[0].style_name, "新配色 单圈表带");
+        assert_eq!(parsed[0].color_name, "勃艮第酒红色");
+
+        let sizes = r#"{"body":{"options":[{"key":"6","text":"6","product":{"options":{"watch_bands":"MKJP4FE/A"}}}]}}"#;
+        let parsed = parse_watch_band_sizes(sizes.as_bytes()).expect("应当解析表带尺码");
+        assert_eq!(parsed[0].text, "6");
+        assert_eq!(parsed[0].part_number, "MKJP4FE/A");
+    }
 }

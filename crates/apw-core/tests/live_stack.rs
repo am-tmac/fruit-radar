@@ -46,6 +46,9 @@ async fn 全栈跑通一轮真实监控() {
                 store_title: store.title.clone(),
                 part_number: product.part_number.clone(),
                 product_name: product.title.clone(),
+                companion_part: None,
+                companion_name: None,
+                kit_part: None,
             });
         }
     }
@@ -144,6 +147,9 @@ async fn 同店一个候选有货后仍会继续检查全部候选() {
             store_title: "上海-香港广场".into(),
             part_number: (*part).into(),
             product_name: (*part).into(),
+            companion_part: None,
+            companion_name: None,
+            kit_part: None,
         })
         .collect();
 

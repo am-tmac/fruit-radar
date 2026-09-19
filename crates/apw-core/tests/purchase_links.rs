@@ -7,6 +7,9 @@ fn target(locale: &str, part: &str) -> Target {
         store_title: "Test store".into(),
         part_number: part.into(),
         product_name: "Test product".into(),
+        companion_part: None,
+        companion_name: None,
+        kit_part: None,
     }
 }
 
@@ -48,6 +51,9 @@ fn 表壳料号打开对应系列配置页以便继续选择表带() {
         capacity: "46 mm".into(),
         color: "Test".into(),
         title: "Apple Watch".into(),
+        companion_part: None,
+        kit_part: None,
+        watch_case_size: Some("42mm".into()),
     };
     assert_eq!(
         target("zh_HK", "MFA04CH/B").purchase_url(Some(&product)),

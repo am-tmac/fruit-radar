@@ -44,6 +44,8 @@ const BOOTSTRAP_MARKER: &[u8] = b"PRODUCT_SELECTION_BOOTSTRAP";
 /// 截出来。不过「不带引号」只是当前打包器的选择，不是契约，带引号的写法也要认。
 const SELECTION_KEY_STR: &str = "productSelectionData";
 const SELECTION_KEY: &[u8] = SELECTION_KEY_STR.as_bytes();
+const BAND_MARKER_STR: &str = "bandSelectionBootstrap";
+const BAND_MARKER: &[u8] = BAND_MARKER_STR.as_bytes();
 
 /// 购买页 HTML 的读取上限。购买页本身在 2 MB 量级，留一倍余量。
 ///
@@ -191,7 +193,125 @@ pub fn parse_buy_page(
             .filter(|url| url.contains(&format!("/shop/buy-mac/{slug}/")))
             .collect();
     }
+    if category == Category::Watch {
+        let (companion, kit) = parse_watch_configuration(page)?;
+        data.companion_part = Some(companion);
+        data.kit_part = Some(kit);
+    }
     Ok(data.to_products(category, slug))
+}
+
+/// 解析 Watch 页面为取货和整表送货查询准备的默认表带与套件号。
+fn parse_watch_configuration(page: &[u8]) -> Result<(String, String), CatalogError> {
+    let raw = extract_named_json_object(page, BAND_MARKER, BAND_MARKER_STR)?;
+    let data: BandSelectionBootstrap =
+        serde_json::from_slice(raw).map_err(|e| CatalogError::PageSchema {
+            detail: format!("{BAND_MARKER_STR} 结构与预期不符：{e}"),
+        })?;
+    let companion = data.companion().ok_or_else(|| CatalogError::PageSchema {
+        detail: format!("{BAND_MARKER_STR} 里没有可用表带零件号"),
+    })?;
+    let kit = data.kit_part().ok_or_else(|| CatalogError::PageSchema {
+        detail: format!("{BAND_MARKER_STR} 里没有整表套件号"),
+    })?;
+    Ok((companion, kit))
+}
+
+fn extract_named_json_object<'a>(
+    page: &'a [u8],
+    marker: &[u8],
+    marker_name: &str,
+) -> Result<&'a [u8], CatalogError> {
+    let mut from = 0usize;
+    while from < page.len() {
+        let Some(relative) = find(&page[from..], marker) else {
+            break;
+        };
+        let at = from + relative;
+        from = at + marker.len();
+        if at > 0 && page.get(at - 1).copied().is_some_and(is_ident_byte) {
+            continue;
+        }
+        let mut pos = skip_space(page, at + marker.len());
+        if !matches!(page.get(pos), Some(b'=' | b':')) {
+            continue;
+        }
+        pos = skip_space(page, pos + 1);
+        if page.get(pos) != Some(&b'{') {
+            continue;
+        }
+        let end = match_object(page, pos).map_err(|detail| CatalogError::PageSchema {
+            detail: format!("截取 {marker_name} 失败：{detail}"),
+        })?;
+        let raw = page.get(pos..end).unwrap_or_default();
+        if serde_json::from_slice::<serde::de::IgnoredAny>(raw).is_ok() {
+            return Ok(raw);
+        }
+    }
+    Err(CatalogError::PageSchema {
+        detail: format!("页面里找不到 {marker_name}"),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BandSelectionBootstrap {
+    #[serde(default)]
+    selection_urls: Option<BandSelectionUrls>,
+    #[serde(default)]
+    band_selection_data: Option<BandSelectionData>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BandSelectionUrls {
+    #[serde(default)]
+    band_selection: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BandSelectionData {
+    #[serde(default)]
+    items: Option<BTreeMap<String, serde_json::Value>>,
+}
+
+impl BandSelectionBootstrap {
+    fn companion(&self) -> Option<String> {
+        let items = self.band_selection_data.as_ref()?.items.as_ref()?;
+        let mut styles: Vec<_> = items.iter().collect();
+        styles.sort_by_key(|(name, value)| {
+            (
+                name.as_str() != "sport",
+                value
+                    .get("sortOrder")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(i64::MAX),
+                name.as_str(),
+            )
+        });
+        styles.into_iter().find_map(|(_, style)| {
+            style
+                .get("subDimensionValue")?
+                .as_array()?
+                .iter()
+                .find_map(|colour| {
+                    let part = colour.pointer("/image/baseIdentifier")?.as_str()?.trim();
+                    (part.contains('/') && !part.is_empty()).then(|| part.to_string())
+                })
+        })
+    }
+
+    fn kit_part(&self) -> Option<String> {
+        let path = self.selection_urls.as_ref()?.band_selection.as_deref()?;
+        let url = reqwest::Url::parse("https://apple.invalid")
+            .ok()?
+            .join(path)
+            .ok()?;
+        url.query_pairs()
+            .find(|(key, _)| key == "product")
+            .map(|(_, value)| value.to_ascii_uppercase())
+            .filter(|value| !value.is_empty())
+    }
 }
 
 /// 取一个 HTML 页面，失败按 [`ApiError`] 的口径分类。
@@ -439,6 +559,11 @@ pub(crate) struct ProductSelection {
     /// 当前页官方具体配置链接，保留在快照中供同一套解析器读取。
     #[serde(rename = "macProductLinks", default)]
     mac_links: Vec<String>,
+    /// 离线快照中保存的 Watch 查询搭档；在线页面由 `parse_buy_page` 补入。
+    #[serde(default)]
+    companion_part: Option<String>,
+    #[serde(default)]
+    kit_part: Option<String>,
 }
 
 /// 维度键 → 取值 → 展示条目。
@@ -634,6 +759,7 @@ impl ProductSelection {
             let mut labels: Vec<String> = Vec::new();
             let mut capacity = String::new();
             let mut color = String::new();
+            let mut watch_case_size = None;
 
             let mac_hints = if category == Category::Mac {
                 self.mac_dimension_hints(item, slug)
@@ -658,6 +784,9 @@ impl ProductSelection {
                 dimensions.sort_by_key(|d| (dimension_rank(d.name), d.key));
             }
             for dim in &dimensions {
+                if category == Category::Watch && dim.name == "dimensionCaseSize" {
+                    watch_case_size = Some(dim.value.to_string());
+                }
                 // familyType 拼出来的名字里已经带着屏幕尺寸（iPhone 17 Pro Max、
                 // iPad Pro 11），再拼一遍就成了「iPad Pro 11 11 英寸机型」。
                 // 退回 slug 的那些品类没这个问题，尺寸必须从维度里补。
@@ -679,8 +808,11 @@ impl ProductSelection {
                         .then(|| mac_dimension_label(dim.name, dim.value))
                         .flatten()
                         .or_else(|| {
-                            // Watch 的结构化材质/连接值比营销 HTML 稳定。官网可能把
-                            // aluminum 的 header 写成“新外观”，不能让它覆盖“铝金属”。
+                            // Watch 的材质等结构化值比展示 HTML 更可靠。官网当前把
+                            // aluminum 的 header 写成“新外观 + 铝金属 + 说明”，
+                            // 通用纯文本提取会先拿到营销徽标“新外观”，从而丢掉
+                            // 真正用于区分 SKU 的“铝金属”。已知枚举先规范化，未知
+                            // 新值仍继续交给官网展示文案兜底。
                             (category == Category::Watch)
                                 .then(|| watch_dimension_fallback(dim.name, dim.value))
                                 .flatten()
@@ -732,6 +864,9 @@ impl ProductSelection {
                 },
                 capacity,
                 color,
+                companion_part: self.companion_part.clone(),
+                kit_part: self.kit_part.clone(),
+                watch_case_size,
             });
         }
 
@@ -1710,5 +1845,23 @@ mod tests {
         let products = parse_product_selection(raw.as_bytes(), Category::Iphone, "iphone-17-pro")
             .expect("应当解析成功");
         assert_eq!(products[0].title, "iPhone 17 Pro Max 1TB 宇宙橙色");
+    }
+
+    #[test]
+    fn watch页面同时解析默认表带和整表套件号() {
+        let page = br#"
+            <script>window.pageLevelData.bandSelectionBootstrap = {
+              "selectionUrls":{"bandSelection":"/shop/api/band-selection?fae=true&product=z0yq"},
+              "bandSelectionData":{"items":{"sport":{"sortOrder":1,"subDimensionValue":[
+                {"image":{"baseIdentifier":"MKDY4FE/A"}}
+              ]}}}
+            };</script>
+            <script>window.PRODUCT_SELECTION_BOOTSTRAP = {productSelectionData:{
+              "products":[{"part":"MJCX4CH/B","dimensions":{"watch_cases-dimensionColor":"black"}}]
+            }};</script>
+        "#;
+        let products = parse_buy_page(page, Category::Watch, "apple-watch-ultra").unwrap();
+        assert_eq!(products[0].companion_part.as_deref(), Some("MKDY4FE/A"));
+        assert_eq!(products[0].kit_part.as_deref(), Some("Z0YQ"));
     }
 }

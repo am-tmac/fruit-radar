@@ -24,9 +24,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
 use serde::{Deserialize, Serialize};
 
-use crate::model::{REGIONS, Target, region_by_locale};
+use crate::model::{DeliveryRegion, REGIONS, Target, region_by_locale};
 
 /// 检测到有货时自动打开的 Apple 页面。
 ///
@@ -183,6 +186,8 @@ pub struct Settings {
     pub locale: String,
     /// 监控目标列表。
     pub targets: Vec<Target>,
+    /// 统一的送货目的地区。为空时保留 Apple 按门店地区给出的估算。
+    pub delivery_region: Option<DeliveryRegion>,
     /// 每轮查询之间的间隔秒数。
     pub interval_seconds: u64,
     /// 为空表示不启用 Bark 推送。
@@ -236,6 +241,7 @@ impl Default for Settings {
         Self {
             locale: fallback_locale().to_string(),
             targets: Vec::new(),
+            delivery_region: None,
             interval_seconds: DEFAULT_INTERVAL_SECONDS,
             bark_url: String::new(),
             product_bark_urls: BTreeMap::new(),
@@ -262,6 +268,11 @@ impl Settings {
         if region_by_locale(&self.locale).is_none() {
             self.locale = fallback_locale().to_string();
         }
+
+        self.delivery_region = self
+            .delivery_region
+            .as_ref()
+            .and_then(DeliveryRegion::normalized);
 
         // 注意是「小于下限就回到默认值」，不是「夹到下限」。手抖填了 1 秒的人
         // 想要的是快，但 5 秒同样会被风控盯上；退回 30 秒才是安全的那一侧。
@@ -404,6 +415,7 @@ impl SettingsStore {
     /// **文件不存在**返回默认设置且不算错误；文件存在却读不出来一律返回错误。
     /// 这个区分是刻意的，理由见模块文档。
     pub fn load(&self) -> Result<Settings, ConfigError> {
+        harden_existing_config(&self.path)?;
         let file = match File::open(&self.path) {
             Ok(f) => f,
             // 只有「确实没有这个文件」才等于「用户还没有配置」。
@@ -579,11 +591,11 @@ fn create_temp_file(dir: &Path) -> Result<(TempFile, File), ConfigError> {
     for _ in 0..32 {
         let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
         let candidate = dir.join(format!(".apw-settings-{}-{seq}.tmp", std::process::id()));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        match options.open(&candidate) {
             Ok(file) => {
                 return Ok((
                     TempFile {
@@ -610,6 +622,7 @@ fn create_temp_file(dir: &Path) -> Result<(TempFile, File), ConfigError> {
 fn write_atomically(path: &Path, data: &[u8]) -> Result<(), ConfigError> {
     let dir = parent_dir(path);
     fs::create_dir_all(dir).map_err(|e| ConfigError::io("创建配置目录", dir, e))?;
+    harden_config_dir(dir)?;
 
     let (mut guard, mut file) = create_temp_file(dir)?;
 
@@ -631,6 +644,43 @@ fn write_atomically(path: &Path, data: &[u8]) -> Result<(), ConfigError> {
     if let Ok(handle) = File::open(dir) {
         let _ = handle.sync_all();
     }
+    Ok(())
+}
+
+/// Unix 上把配置目录与设置文件收紧到当前用户可读写。
+///
+/// Bark 地址里含设备密钥，不能依赖系统 umask 恰好足够严格。Windows 的用户配置
+/// 目录由 ACL 保护，因此这里不额外改动。
+#[cfg(unix)]
+fn harden_config_dir(dir: &Path) -> Result<(), ConfigError> {
+    // 裸文件名会退回当前目录，测试或嵌入方不应因此被修改整个工作目录权限。
+    if dir == Path::new(".") {
+        return Ok(());
+    }
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+        .map_err(|source| ConfigError::io("收紧配置目录权限", dir, source))
+}
+
+#[cfg(not(unix))]
+fn harden_config_dir(_dir: &Path) -> Result<(), ConfigError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn harden_existing_config(path: &Path) -> Result<(), ConfigError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            harden_config_dir(parent_dir(path))?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                .map_err(|source| ConfigError::io("收紧设置文件权限", path, source))
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(ConfigError::io("检查设置文件权限", path, source)),
+    }
+}
+
+#[cfg(not(unix))]
+fn harden_existing_config(_path: &Path) -> Result<(), ConfigError> {
     Ok(())
 }
 
@@ -680,6 +730,9 @@ impl LegacyTarget {
             store_title: self.store_title,
             part_number: self.part_number,
             product_name: self.product_name,
+            companion_part: None,
+            companion_name: None,
+            kit_part: None,
         }
     }
 }
@@ -696,6 +749,7 @@ impl LegacySettings {
                 .into_iter()
                 .map(LegacyTarget::into_target)
                 .collect(),
+            delivery_region: None,
             interval_seconds: self
                 .interval_seconds
                 .and_then(|v| u64::try_from(v).ok())
@@ -734,6 +788,9 @@ mod tests {
             store_title: "上海-环球港".into(),
             part_number: part.into(),
             product_name: "iPhone 17 512GB 黑色".into(),
+            companion_part: None,
+            companion_name: None,
+            kit_part: None,
         }
     }
 

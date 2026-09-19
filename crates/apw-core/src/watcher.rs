@@ -30,10 +30,16 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
 
-use crate::apple::{ApiError, Fetcher};
+use crate::apple::{ApiError, CycleStats, Fetcher, ScheduleHint};
 use crate::model::{
-    Availability, PickupDetails, Target, TargetKey, UnknownReason, region_by_locale,
+    Availability, DeliveryRegion, PickupDetails, Target, TargetKey, UnknownReason, region_by_locale,
 };
+
+/// Apple 取货接口单次请求稳定返回的最大零件号数量。
+///
+/// 实测请求 21 个及以上零件号时，接口可能只返回前 20 个而不报错。调度层必须在
+/// 发请求之前分批，不能把被静默截断的型号长期留在「未返回」状态。
+pub const MAX_PARTS_PER_REQUEST: usize = 20;
 
 /// 单个监控目标的当前状态。
 ///
@@ -100,6 +106,17 @@ pub enum Event {
         /// 从开始调度到所有门店查询结束的耗时，包含限速与会话暖场。
         #[serde(rename = "elapsedMs")]
         elapsed_ms: u64,
+        /// 本轮真正发往 Apple 的请求数；响应缓存命中不计入。
+        #[serde(rename = "requestCount")]
+        request_count: u32,
+        /// 本轮有多少个门店直接复用了同地区响应。
+        #[serde(rename = "reusedResponseCount")]
+        reused_response_count: u32,
+        /// 调度器实际采用的下一轮等待秒数。
+        #[serde(rename = "nextCheckInSecs")]
+        next_check_in_secs: u64,
+        /// 当前目标地区中是否仍有 Apple 查询保护冷却。
+        cooling: bool,
         /// 本轮是否所有目标都拿到了明确答复。
         ///
         /// 界面需要一个明确的「恢复」信号才能收起故障告警。用「所有行都没有
@@ -133,15 +150,17 @@ pub struct WatcherConfig {
     pub concurrency: usize,
     /// 事件通道容量。
     pub event_buffer: usize,
+    pub delivery_region: Option<DeliveryRegion>,
 }
 
 impl Default for WatcherConfig {
     fn default() -> Self {
         Self {
             interval: Duration::from_secs(30),
-            jitter: 0.2,
+            jitter: 0.0,
             concurrency: 4,
             event_buffer: 256,
+            delivery_region: None,
         }
     }
 }
@@ -149,8 +168,10 @@ impl Default for WatcherConfig {
 enum Command {
     SetTargets(Vec<Target>),
     SetInterval(Duration),
+    SetDeliveryRegion(Option<DeliveryRegion>),
     Start(oneshot::Sender<()>),
     Stop(oneshot::Sender<()>),
+    RetryNow(oneshot::Sender<bool>),
     Snapshot(oneshot::Sender<Vec<TargetState>>),
     IsRunning(oneshot::Sender<bool>),
 }
@@ -204,6 +225,10 @@ impl Watcher {
         let _ = self.cmd.send(Command::SetInterval(interval)).await;
     }
 
+    pub async fn set_delivery_region(&self, region: Option<DeliveryRegion>) {
+        let _ = self.cmd.send(Command::SetDeliveryRegion(region)).await;
+    }
+
     /// 启动监控。返回时引擎已经进入运行态。
     pub async fn start(&self) {
         let (tx, rx) = oneshot::channel();
@@ -222,6 +247,16 @@ impl Watcher {
         if self.cmd.send(Command::Stop(tx)).await.is_ok() {
             let _ = rx.await;
         }
+    }
+
+    /// 用户主动要求立即查询。运行中返回 `true`，并唤醒当前轮次等待；暂停时
+    /// 返回 `false`，不会擅自启动监控。
+    pub async fn retry_now(&self) -> bool {
+        let (tx, rx) = oneshot::channel();
+        if self.cmd.send(Command::RetryNow(tx)).await.is_err() {
+            return false;
+        }
+        rx.await.unwrap_or(false)
     }
 
     /// 取当前全部状态的快照。
@@ -256,6 +291,8 @@ pub enum TroubleAdvice {
     ///
     /// HTTP 541 本身不能证明网络被封锁，更不能保证换网络就能恢复。
     TryAnotherNetwork,
+    /// 已进入保护冷却，用户无需操作，等待程序自动探测。
+    WaitForRetry,
     /// 用户做什么都没用，只能等新版本。
     ///
     /// 接口结构变了、或者程序内部出错时给这条。明说「你没法解决」也是一种有用的
@@ -277,7 +314,7 @@ struct TroubleReport {
 struct StoreGroup {
     locale: String,
     store_number: String,
-    parts: Vec<String>,
+    targets: Vec<Target>,
 }
 
 /// 单个门店查询完的结果。
@@ -303,11 +340,8 @@ struct StoreOutcome {
 fn expected_keys(groups: &[StoreGroup]) -> BTreeSet<TargetKey> {
     let mut keys = BTreeSet::new();
     for g in groups {
-        for part in &g.parts {
-            keys.insert(TargetKey(format!(
-                "{}|{}|{}",
-                g.locale, g.store_number, part
-            )));
+        for target in &g.targets {
+            keys.insert(target.key());
         }
     }
     keys
@@ -322,18 +356,25 @@ async fn run_queries<F: Fetcher>(
     client: F,
     groups: Vec<StoreGroup>,
     concurrency: usize,
+    delivery_region: Option<DeliveryRegion>,
 ) -> Vec<StoreOutcome> {
+    client.begin_cycle().await;
     let sem = Arc::new(Semaphore::new(concurrency.max(1)));
     let mut set = JoinSet::new();
 
     for group in groups {
         let client = client.clone();
         let sem = Arc::clone(&sem);
+        // 省、市、区是中国大陆站专用参数。设置本身保留，方便用户切回大陆地区；
+        // 但绝不能带到香港、日本等地区的送货请求里。
+        let delivery_region = (group.locale == "zh_CN")
+            .then(|| delivery_region.clone())
+            .flatten();
         set.spawn(async move {
             // 拿不到许可只可能是信号量被关闭，这里不会发生；真发生了也只是
             // 少查一个门店，不该让整轮崩掉。
             let _permit = sem.acquire_owned().await;
-            query_one_store(&client, group).await
+            query_one_store(&client, group, delivery_region.as_ref()).await
         });
     }
 
@@ -365,7 +406,11 @@ async fn run_queries<F: Fetcher>(
     outcomes
 }
 
-async fn query_one_store<F: Fetcher>(client: &F, group: StoreGroup) -> StoreOutcome {
+async fn query_one_store<F: Fetcher>(
+    client: &F,
+    group: StoreGroup,
+    delivery_region: Option<&DeliveryRegion>,
+) -> StoreOutcome {
     let Some(region) = region_by_locale(&group.locale) else {
         // 地区认不出来就压根发不出请求。必须登记成故障，不能静默跳过 ——
         // 静默跳过会让这些行永远停在「待查询」，用户看不出程序从没查过它们。
@@ -373,12 +418,18 @@ async fn query_one_store<F: Fetcher>(client: &F, group: StoreGroup) -> StoreOutc
             field: "locale".into(),
             raw: group.locale.clone(),
         };
-        let n = group.parts.len();
+        let n = group.targets.len();
         return StoreOutcome {
             parts: group
-                .parts
+                .targets
                 .into_iter()
-                .map(|p| (p, Availability::Unknown(reason.clone()), None))
+                .map(|target| {
+                    (
+                        target.part_number,
+                        Availability::Unknown(reason.clone()),
+                        None,
+                    )
+                })
                 .collect(),
             trouble: Some(TroubleReport {
                 // 这句本身就说清了该做什么，不必再挂一条泛泛的建议。
@@ -396,7 +447,7 @@ async fn query_one_store<F: Fetcher>(client: &F, group: StoreGroup) -> StoreOutc
     };
 
     match client
-        .pickup_message(region, &group.store_number, &group.parts)
+        .pickup_message(region, &group.store_number, &group.targets, delivery_region)
         .await
     {
         Err(err) => {
@@ -405,6 +456,10 @@ async fn query_one_store<F: Fetcher>(client: &F, group: StoreGroup) -> StoreOutc
             // 自己就好了，弹出来只是噪音。
             let advice = match &err {
                 ApiError::Blocked(_) => Some(TroubleAdvice::TryAnotherNetwork),
+                ApiError::CoolingDown {
+                    newly_started: true,
+                    ..
+                } => Some(TroubleAdvice::WaitForRetry),
                 ApiError::SchemaDrift { .. } => Some(TroubleAdvice::WaitForUpdate),
                 ApiError::NoPickupData { .. } => Some(TroubleAdvice::CheckProduct),
                 _ => None,
@@ -419,12 +474,18 @@ async fn query_one_store<F: Fetcher>(client: &F, group: StoreGroup) -> StoreOutc
             });
 
             let reason = err.into_unknown_reason();
-            let n = group.parts.len();
+            let n = group.targets.len();
             StoreOutcome {
                 parts: group
-                    .parts
+                    .targets
                     .into_iter()
-                    .map(|p| (p, Availability::Unknown(reason.clone()), None))
+                    .map(|target| {
+                        (
+                            target.part_number,
+                            Availability::Unknown(reason.clone()),
+                            None,
+                        )
+                    })
                     .collect(),
                 locale: group.locale,
                 store_number: group.store_number,
@@ -434,13 +495,14 @@ async fn query_one_store<F: Fetcher>(client: &F, group: StoreGroup) -> StoreOutc
             }
         }
         Ok(result) => {
-            let mut parts = Vec::with_capacity(group.parts.len());
+            let mut parts = Vec::with_capacity(group.targets.len());
             let mut problems = 0usize;
             // 真正拿到明确答复（有货或无货）的型号数。
             let mut resolved = 0usize;
             let mut omitted = 0usize;
 
-            for part in &group.parts {
+            for target in &group.targets {
+                let part = &target.part_number;
                 match result.parts.get(part) {
                     None => {
                         // 请求成功但响应里没有这个型号，通常意味着零件号已经下架
@@ -473,10 +535,10 @@ async fn query_one_store<F: Fetcher>(client: &F, group: StoreGroup) -> StoreOutc
             // 一个型号都没拿到明确答复，说明这个门店这一轮实质上是废的：
             // 要么零件号全对不上，要么 Apple 换了词表。必须按门店级失败处理，
             // 否则不退避、不告警，程序会继续按原频率请求一个已经失效的结构。
-            let dead = resolved == 0 && !group.parts.is_empty();
+            let dead = resolved == 0 && !group.targets.is_empty();
             StoreOutcome {
                 trouble: dead.then(|| TroubleReport {
-                    reason: if omitted == group.parts.len() {
+                    reason: if omitted == group.targets.len() {
                         format!(
                             "Apple 的门店 {} 响应未包含本次请求的任何型号；暂无库存结论",
                             group.store_number
@@ -487,7 +549,7 @@ async fn query_one_store<F: Fetcher>(client: &F, group: StoreGroup) -> StoreOutc
                             group.store_number
                         )
                     },
-                    advice: Some(if omitted == group.parts.len() {
+                    advice: Some(if omitted == group.targets.len() {
                         TroubleAdvice::CheckProduct
                     } else {
                         TroubleAdvice::WaitForUpdate
@@ -558,15 +620,29 @@ impl<F: Fetcher> Engine<F> {
             // 在飞的 HTTP 请求会跟着一起停。
             let groups = self.group_targets();
             let expected = expected_keys(&groups);
+            let store_count = groups
+                .iter()
+                .map(|group| (&group.locale, &group.store_number))
+                .collect::<BTreeSet<_>>()
+                .len();
+            let mut locales: Vec<String> =
+                groups.iter().map(|group| group.locale.clone()).collect();
+            locales.sort_unstable();
+            locales.dedup();
             self.cycle_number = self.cycle_number.saturating_add(1);
             let cycle = self.cycle_number;
             let started_at = Instant::now();
             self.emit_droppable(Event::CycleStarted {
                 cycle,
-                store_count: groups.len(),
+                store_count,
                 target_count: expected.len(),
             });
-            let queries = run_queries(self.client.clone(), groups, self.config.concurrency);
+            let queries = run_queries(
+                self.client.clone(),
+                groups,
+                self.config.concurrency,
+                self.config.delivery_region.clone(),
+            );
             tokio::pin!(queries);
 
             let outcomes = loop {
@@ -589,6 +665,9 @@ impl<F: Fetcher> Engine<F> {
 
             let Some(outcomes) = outcomes else { continue };
 
+            let stats = self.client.cycle_stats().await;
+            let schedule_hint = self.client.schedule_hint(&locales).await;
+
             // 写状态之前先把已经排队的命令处理掉。
             //
             // 内层 select 用了 biased，结果就绪时优先于命令。用户恰好在同一瞬间删掉
@@ -610,19 +689,21 @@ impl<F: Fetcher> Engine<F> {
                 continue;
             }
 
-            self.apply(
-                cycle,
-                started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
-                expected,
-                outcomes,
-            )
-            .await;
+            let delay = self
+                .apply(
+                    cycle,
+                    started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                    expected,
+                    outcomes,
+                    stats,
+                    schedule_hint,
+                )
+                .await;
 
             if !self.running {
                 continue;
             }
 
-            let delay = self.next_delay();
             tokio::select! {
                 () = tokio::time::sleep(delay) => {}
                 maybe = cmd_rx.recv() => match maybe {
@@ -641,6 +722,7 @@ impl<F: Fetcher> Engine<F> {
                     self.config.interval = d;
                 }
             }
+            Command::SetDeliveryRegion(region) => self.config.delivery_region = region,
             Command::Start(reply) => {
                 self.set_running(true).await;
                 let _ = reply.send(());
@@ -648,6 +730,13 @@ impl<F: Fetcher> Engine<F> {
             Command::Stop(reply) => {
                 self.set_running(false).await;
                 let _ = reply.send(());
+            }
+            Command::RetryNow(reply) => {
+                let accepted = self.running;
+                if accepted {
+                    self.client.retry_now().await;
+                }
+                let _ = reply.send(accepted);
             }
             Command::Snapshot(reply) => {
                 let _ = reply.send(self.snapshot());
@@ -696,30 +785,67 @@ impl<F: Fetcher> Engine<F> {
         self.states.values().cloned().collect()
     }
 
-    /// 把目标按 (地区, 门店) 聚合，使每个门店每轮只发一次请求。
+    /// 按 (地区, 门店) 聚合，并把每个请求控制在 Apple 的 20 个零件号上限内。
+    ///
+    /// 普通商品通常一条目标占一个零件号；Watch 取货还可能同时携带表带零件号，
+    /// 因此不能只按目标条数切片，必须按最终会发出的唯一零件号数量分批。
     fn group_targets(&self) -> Vec<StoreGroup> {
         let mut order: Vec<(String, String)> = Vec::new();
-        let mut index: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+        let mut index: BTreeMap<(String, String), Vec<Target>> = BTreeMap::new();
 
         for t in &self.targets {
             let k = (t.locale.clone(), t.store_number.clone());
             if !index.contains_key(&k) {
                 order.push(k.clone());
             }
-            index.entry(k).or_default().push(t.part_number.clone());
+            index.entry(k).or_default().push(t.clone());
         }
 
-        order
-            .into_iter()
-            .map(|(locale, store_number)| {
-                let parts = index.remove(&(locale.clone(), store_number.clone()));
-                StoreGroup {
+        let mut groups = Vec::new();
+        for (locale, store_number) in order {
+            let targets = index
+                .remove(&(locale.clone(), store_number.clone()))
+                .unwrap_or_default();
+            let mut batch = Vec::new();
+            let mut parts = BTreeSet::new();
+
+            for target in targets {
+                let mut target_parts = vec![target.part_number.as_str()];
+                if let Some(companion) = target
+                    .companion_part
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|part| !part.is_empty())
+                {
+                    target_parts.push(companion);
+                }
+                let additional = target_parts
+                    .iter()
+                    .filter(|part| !parts.contains::<str>(*part))
+                    .count();
+
+                if !batch.is_empty() && parts.len() + additional > MAX_PARTS_PER_REQUEST {
+                    groups.push(StoreGroup {
+                        locale: locale.clone(),
+                        store_number: store_number.clone(),
+                        targets: std::mem::take(&mut batch),
+                    });
+                    parts.clear();
+                }
+
+                parts.extend(target_parts.into_iter().map(str::to_string));
+                batch.push(target);
+            }
+
+            if !batch.is_empty() {
+                groups.push(StoreGroup {
                     locale,
                     store_number,
-                    parts: parts.unwrap_or_default(),
-                }
-            })
-            .collect()
+                    targets: batch,
+                });
+            }
+        }
+        groups
     }
 
     /// 把一轮的结果写进状态，并发出相应事件。
@@ -729,7 +855,9 @@ impl<F: Fetcher> Engine<F> {
         elapsed_ms: u64,
         mut missing: BTreeSet<TargetKey>,
         outcomes: Vec<StoreOutcome>,
-    ) {
+        stats: CycleStats,
+        schedule_hint: ScheduleHint,
+    ) -> Duration {
         let mut ok = 0usize;
         let mut failed = 0usize;
         let mut problems = 0usize;
@@ -823,13 +951,23 @@ impl<F: Fetcher> Engine<F> {
         // 目标数超过通道容量时，排在最后的 CycleComplete 必然被丢，界面就会一直
         // 停在上一轮的取值上 —— 而那很可能正是「无货」。实测 260 个目标时连续
         // 18 轮一条都没送达。
+        let normal_delay = self.next_delay();
+        let delay = normal_delay.max(schedule_hint.delay);
+        let next_check_in_secs = delay
+            .as_secs()
+            .saturating_add(u64::from(delay.subsec_nanos() > 0));
         self.emit_critical(Event::CycleComplete {
             cycle,
             elapsed_ms,
+            request_count: stats.request_count,
+            reused_response_count: stats.reused_response_count,
+            next_check_in_secs,
+            cooling: schedule_hint.cooling,
             healthy: problems == 0 && ok > 0,
             snapshot: self.snapshot(),
         })
         .await;
+        delay
     }
 
     /// 下一轮的等待时长，含抖动与全局退避。

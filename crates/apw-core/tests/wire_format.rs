@@ -52,6 +52,10 @@ fn 未知状态会扁平成两层判别字段() {
             json!({"kind": "unknown", "reason": "not_yet_checked"}),
         ),
         (
+            UnknownReason::PickupPending,
+            json!({"kind": "unknown", "reason": "pickup_pending"}),
+        ),
+        (
             UnknownReason::Blocked {
                 detail: "HTTP 541".into(),
             },
@@ -60,6 +64,13 @@ fn 未知状态会扁平成两层判别字段() {
         (
             UnknownReason::RateLimited,
             json!({"kind": "unknown", "reason": "rate_limited"}),
+        ),
+        (
+            UnknownReason::CoolingDown {
+                remaining_seconds: 299,
+                detail: "HTTP 541".into(),
+            },
+            json!({"kind": "unknown", "reason": "cooling_down", "remaining_seconds": 299, "detail": "HTTP 541"}),
         ),
         (
             UnknownReason::SchemaDrift {
@@ -101,6 +112,9 @@ fn 跨边界的结构统一用小驼峰() {
         store_title: "上海-环球港".into(),
         part_number: "MG724CH/A".into(),
         product_name: "iPhone 17 512GB 黑色".into(),
+        companion_part: None,
+        companion_name: None,
+        kit_part: None,
     };
     assert_eq!(
         to_value(&target),
@@ -120,6 +134,9 @@ fn 跨边界的结构统一用小驼峰() {
         capacity: "512GB".into(),
         color: "黑色".into(),
         title: "iPhone 17 512GB 黑色".into(),
+        companion_part: None,
+        kit_part: None,
+        watch_case_size: None,
     };
     let v = to_value(&product);
     assert!(v.get("partNumber").is_some(), "Product 应当用小驼峰：{v}");
@@ -159,7 +176,9 @@ fn 故障建议的线上格式是小写标识符() {
     // 理由就是让他知道。
     for (advice, want) in [
         (TroubleAdvice::TryAnotherNetwork, "try_another_network"),
+        (TroubleAdvice::WaitForRetry, "wait_for_retry"),
         (TroubleAdvice::WaitForUpdate, "wait_for_update"),
+        (TroubleAdvice::CheckProduct, "check_product"),
     ] {
         assert_eq!(to_value(&advice), json!(want));
     }
@@ -190,12 +209,20 @@ fn 轮询事件携带前端可用的轮次与耗时() {
     let completed = to_value(&Event::CycleComplete {
         cycle: 2,
         elapsed_ms: 2_150,
+        request_count: 1,
+        reused_response_count: 2,
+        next_check_in_secs: 60,
+        cooling: true,
         healthy: true,
         snapshot: Vec::new(),
     });
     assert_eq!(completed.get("type"), Some(&json!("cycleComplete")));
     assert_eq!(completed.get("cycle"), Some(&json!(2)));
     assert_eq!(completed.get("elapsedMs"), Some(&json!(2_150)));
+    assert_eq!(completed.get("requestCount"), Some(&json!(1)));
+    assert_eq!(completed.get("reusedResponseCount"), Some(&json!(2)));
+    assert_eq!(completed.get("nextCheckInSecs"), Some(&json!(60)));
+    assert_eq!(completed.get("cooling"), Some(&json!(true)));
     assert!(completed.get("elapsed_ms").is_none());
 }
 
@@ -208,6 +235,9 @@ fn 监控目标能原样往返() {
         store_title: "東京-渋谷".into(),
         part_number: "MG6A4J/A".into(),
         product_name: "iPhone 17 256GB ラベンダー".into(),
+        companion_part: None,
+        companion_name: None,
+        kit_part: None,
     };
     let json = serde_json::to_string(&target).unwrap();
     let back: Target = serde_json::from_str(&json).expect("反序列化失败");

@@ -87,6 +87,7 @@ import {
   setIntervalSeconds,
   setProductBarkUrl,
   setTargets,
+  retryWatchingNow,
   startWatching,
   stopWatching,
   testNotify,
@@ -302,17 +303,22 @@ export default function App() {
   const [intervalDraft, setIntervalDraft] = useState<number | null>(null);
   // 清空取货信息后要靠它重挂载输入框，否则非受控的输入框还显示旧值。
   const [pickupFormKey, setPickupFormKey] = useState(0);
+  const [isRetrying, setIsRetrying] = useState(false);
 
   const barkValue = barkDraft ?? ui.settings.barkUrl;
   const intervalValue = intervalDraft ?? ui.settings.intervalSeconds;
   const latestCheckedMs = Math.max(0, ...ui.rows.map((row) => row.lastCheckedMs ?? 0));
-  const secondsUntilNextCheck = latestCheckedMs
-    ? Math.max(0, Math.ceil((latestCheckedMs + ui.settings.intervalSeconds * 1_000 - clockMs) / 1_000))
+  // 用调度器给出的真实下一轮时间，而不是「最后检查时间 + 用户间隔」：保护冷却
+  // 或请求预算会把下一轮推后，本地推算出来的倒计时会和实际不符。
+  const secondsUntilNextCheck = ui.nextCheckAtMs
+    ? Math.max(0, Math.ceil((ui.nextCheckAtMs - clockMs) / 1_000))
     : null;
   const runningLabel =
     secondsUntilNextCheck === null || secondsUntilNextCheck === 0
       ? "正在查询"
-      : `约 ${secondsUntilNextCheck} 秒后检查`;
+      : ui.cooling
+        ? `保护冷却中 · 约 ${secondsUntilNextCheck} 秒后检查`
+        : `约 ${secondsUntilNextCheck} 秒后检查`;
 
   const storeOptions = useMemo(
     () => ui.stores.map((store) => ({ value: store.number, label: store.title })),
@@ -410,6 +416,15 @@ export default function App() {
     }
   }
 
+  async function onRetryNow() {
+    setIsRetrying(true);
+    try {
+      await retryWatchingNow();
+    } finally {
+      setIsRetrying(false);
+    }
+  }
+
   async function onRemove(target: Target) {
     await setTargets(targets.filter((item) => targetKey(item) !== targetKey(target)));
   }
@@ -481,9 +496,23 @@ export default function App() {
               </div>
               <div className="mt-1.5 mb-3.5 text-[11.5px] text-muted-foreground/70 tabular-nums">{railMeta}</div>
               {ui.running ? (
-                <button type="button" className="ghost-button" onClick={() => void stopWatching()}>
-                  <Pause className="size-3.5" aria-hidden="true" /> 暂停监控
-                </button>
+                <>
+                  <button type="button" className="ghost-button" onClick={() => void stopWatching()}>
+                    <Pause className="size-3.5" aria-hidden="true" /> 暂停监控
+                  </button>
+                  {ui.cooling && (
+                    <button
+                      type="button"
+                      className="ghost-button mt-2"
+                      onClick={() => void onRetryNow()}
+                      disabled={isRetrying}
+                      aria-busy={isRetrying}
+                    >
+                      <RefreshCw className={`size-3.5 ${isRetrying ? "animate-spin" : ""}`} aria-hidden="true" />
+                      {isRetrying ? "正在重试" : "立即重试"}
+                    </button>
+                  )}
+                </>
               ) : (
                 <button
                   type="button"

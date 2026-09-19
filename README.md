@@ -1,6 +1,6 @@
 # 水果雷达（Fruit Radar）
 
-当前分支版本：**1.0.6-custom.1**（选择性移植上游 v1.0.6 展示改进，同时保留手动开始 + 独立临时查询 profile 修正）。版本号独立于上游；下方历史截图及上游安装说明不代表本分支已发布安装包。
+当前分支版本：**1.1.0**（在上游 v1.0.6 展示改进之上，选择性移植 v1.0.7–v1.0.10 的请求保护冷却、请求预算/节流、冷却期「立即重试」与零件号分批查询，同时保留手动开始 + 独立临时查询 profile 修正与水果雷达界面改版）。版本号独立于上游；下方历史截图及上游安装说明不代表本分支已发布安装包。
 
 > **这是 [suversal/apple-store-inventory-monitor](https://github.com/suversal/apple-store-inventory-monitor)（果到雷达 v1.0.4）的修改分支，由 am-tmac 维护，不是上游官方版本。**
 >
@@ -10,6 +10,8 @@
 > - 自绘应用图标（用户提供的「彩虹飘带苹果」logo，量化为干净硬边），源文件与处理流程见 `assets/README.md`，改动后跑 `pnpm tauri icon assets/app-icon.png` 重新生成整套
 > - 启动只初始化目标与间隔，恢复 `3d7c56e` 的手动开始行为，不读取自动恢复标记；保留初始化屏障与启停安全串行化。库存查询恢复 `3d7c56e` 的独立临时 profile 与请求链路，保留进程 RAII；自动加购去重、过期和结账保护；Bark 错误与活动日志脱敏及有界滚动。
 > - 选择性移植上游 v1.0.6 的已有送货说明/取货日期展示、Apple Watch 结构化型号名称、下拉说明搜索和设置保存结果反馈；不引入送货地区、表带组合或额外 Apple 请求。
+> - 选择性移植上游 v1.0.8–v1.0.10 的请求保护边界（**不含**北京荟聚 R792 门店、监控列表列间距与上游的中文品牌改名）：403 / 429 / 541 进入分级保护冷却并在结束后自动恢复探测；取消安全的全局请求预算与轮询节流，界面倒计时改用调度器给出的真实下一轮时间；保护冷却期间提供「立即重试」（只解除等待，不伪造成功，暂停再开始仍保留真实冷却状态）；单门店超过 20 个零件号自动分批查询（Apple Watch 表带零件号一并计入上限）。
+> - 移植上游的配置与通知加固：配置目录 / 设置文件权限收紧为 `0700` / `0600` 并在读取旧配置时自动修复，Bark 网络与服务端错误不再回显完整地址或设备密钥。
 > - 关闭更新产物签名（`createUpdaterArtifacts: false`），更新端点指向本仓库
 >
 > 依据 GPL-3.0-or-later 发布，原始版权与许可声明（`LICENSE`、`NOTICE`）保留不变。
@@ -18,7 +20,7 @@
 
 果到雷达是一款 Apple 直营店取货库存监控工具。选好地区、门店和具体型号后，它会定时检查库存；检测到有货时，可以播放提示音、推送 Bark，并按你的选择打开 Apple 购物袋或商品详情。
 
-上游支持 macOS、Windows 和 Linux，使用 Rust、Tauri 2 和 React 编写。本 README 对应水果雷达 **1.0.6-custom.1** 源码；上游英文应用名为 **Apple Store Inventory Monitor**，仓库名为 `apple-store-inventory-monitor`。
+上游支持 macOS、Windows 和 Linux，使用 Rust、Tauri 2 和 React 编写。本 README 对应水果雷达 **1.1.0** 源码；上游英文应用名为 **Apple Store Inventory Monitor**，仓库名为 `apple-store-inventory-monitor`。
 
 基于 [ENCHIGO/apple-pickup-watcher v0.3.2](https://github.com/ENCHIGO/apple-pickup-watcher/tree/v0.3.2) 继续开发，按 GPL-3.0-or-later 发布。来源与修改记录见 [NOTICE](NOTICE)。
 
@@ -84,7 +86,7 @@ codesign --verify --deep --strict target/release/bundle/macos/水果雷达.app
 
 ## 安装
 
-以下为上游安装说明及历史版本记录。本分支 1.0.6-custom.1 当前仅准备源码与本地 macOS 构建包，未据此发布 Release；不要把上游历史版本的签名问题等同于本分支。
+以下为上游安装说明及历史版本记录。本分支 1.1.0 当前仅准备源码与本地 macOS 构建包，未据此发布 Release；不要把上游历史版本的签名问题等同于本分支。
 
 打开 [最新正式版本](https://github.com/suversal/apple-store-inventory-monitor/releases/latest)，在 **Assets** 中下载对应系统的安装包。每个版本的变化见 [更新记录](CHANGELOG.md)。
 

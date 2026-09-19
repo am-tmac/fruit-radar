@@ -11,7 +11,7 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
-use crate::model::{Availability, PickupDetails, Region, UnknownReason};
+use crate::model::{Availability, DeliveryRegion, PickupDetails, Region, Target, UnknownReason};
 
 /// 请求失败的分类。
 ///
@@ -30,6 +30,17 @@ pub enum ApiError {
     /// 触发了频率限制，应当退避后重试。
     #[error("请求过于频繁被限流：{0}")]
     RateLimited(String),
+
+    /// 查询器正在主动保护当前地区，本次没有向 Apple 发出请求。
+    ///
+    /// `newly_started` 只供调度层决定是否发一次顶部告警；同一冷却期内其余门店
+    /// 仍会进入明确的「冷却中」未知状态，但不会重复刷屏。
+    #[error("Apple 查询保护冷却中，约 {remaining_seconds} 秒后自动探测：{detail}")]
+    CoolingDown {
+        remaining_seconds: u64,
+        detail: String,
+        newly_started: bool,
+    },
 
     /// 响应能解析成 JSON，但结构与预期不符，通常意味着 Apple 又改了接口。
     #[error("接口返回结构与预期不符：字段 {field} 的取值为 {raw:?}")]
@@ -59,6 +70,14 @@ impl ApiError {
         match self {
             Self::Blocked(detail) => UnknownReason::Blocked { detail },
             Self::RateLimited(_) => UnknownReason::RateLimited,
+            Self::CoolingDown {
+                remaining_seconds,
+                detail,
+                ..
+            } => UnknownReason::CoolingDown {
+                remaining_seconds,
+                detail,
+            },
             Self::SchemaDrift { field, raw } => UnknownReason::SchemaDrift { field, raw },
             Self::NoPickupData { store_number } => UnknownReason::NoPickupData { store_number },
             Self::Apple(message) => UnknownReason::AppleError { message },
@@ -455,12 +474,57 @@ fn looks_like_json(content_type: &str, body: &[u8]) -> bool {
 /// 用泛型约束而不是 trait object：async fn in trait 在泛型位置可以直接写，
 /// 做成 `dyn` 还得引第三方宏来装箱 future，而引擎只需要一个具体实现，不值得。
 pub trait Fetcher: Clone + Send + Sync + 'static {
+    /// 开始新轮次。真实查询器用它清空只允许在单轮内复用的响应缓存。
+    fn begin_cycle(&self) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
+
+    /// 当前轮次实际发出的请求数与响应复用次数。
+    fn cycle_stats(&self) -> impl std::future::Future<Output = CycleStats> + Send {
+        async { CycleStats::default() }
+    }
+
+    /// 按地区保护冷却计算下一轮至少还要等待多久。
+    fn schedule_hint(
+        &self,
+        _locales: &[String],
+    ) -> impl std::future::Future<Output = ScheduleHint> + Send {
+        async { ScheduleHint::default() }
+    }
+
+    /// 用户主动要求立即重试时，解除查询器内部的等待状态。
+    ///
+    /// 默认查询器没有地区冷却，因此默认实现无需处理。带保护冷却的实现应当只
+    /// 清除等待，不伪造成功；下一轮仍按 Apple 的真实响应重新判断状态。
+    fn retry_now(&self) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
+
     fn pickup_message(
         &self,
         region: &'static Region,
         store_number: &str,
-        parts: &[String],
+        targets: &[Target],
+        delivery_region: Option<&DeliveryRegion>,
     ) -> impl std::future::Future<Output = Result<StoreAvailability, ApiError>> + Send;
+}
+
+/// 一轮内查询器真正产生的网络负载。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CycleStats {
+    pub request_count: u32,
+    pub reused_response_count: u32,
+}
+
+/// 查询器对下一轮开始时间的最低要求。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScheduleHint {
+    pub delay: Duration,
+    /// 当前目标地区中是否仍有 Apple 查询保护冷却。
+    ///
+    /// 这和 `delay` 是否最终拉长下一轮不是一回事：冷却剩余时间可能短于用户
+    /// 配置的普通间隔，但界面仍应如实展示冷却状态并允许用户立即重试。
+    pub cooling: bool,
 }
 
 impl Fetcher for AppleClient {
@@ -468,9 +532,14 @@ impl Fetcher for AppleClient {
         &self,
         region: &'static Region,
         store_number: &str,
-        parts: &[String],
+        targets: &[Target],
+        _delivery_region: Option<&DeliveryRegion>,
     ) -> Result<StoreAvailability, ApiError> {
-        AppleClient::pickup_message(self, region, store_number, parts).await
+        let parts: Vec<String> = targets
+            .iter()
+            .map(|target| target.part_number.clone())
+            .collect();
+        AppleClient::pickup_message(self, region, store_number, &parts).await
     }
 }
 
@@ -707,7 +776,8 @@ fn check_envelope(resp: &PickupResponse) -> Result<(), ApiError> {
 /// 把 Apple 的 `pickupDisplay` 字段翻译成三态。
 ///
 /// 已实际观测到的取值：`available`（可取货）、`unavailable`（不可取货）、
-/// `ineligible`（该型号在此门店不支持到店取货）。
+/// `ineligible`（该型号在此门店不支持到店取货）、`default`（新品的取货状态
+/// 尚待开放或公布，具体说明由 `pickupQuote` 提供）。
 ///
 /// 未知取值一律归为 `Unknown` 并带上原始值，而不是 `OutOfStock` —— 猜错成
 /// 「无货」会让用户错过机会，猜错成「未知」只是让用户多看一眼。同样重要的是，
@@ -717,6 +787,7 @@ pub fn availability_from(pickup_display: &str) -> Availability {
     match pickup_display.trim().to_ascii_lowercase().as_str() {
         "available" => Availability::InStock,
         "unavailable" | "ineligible" => Availability::OutOfStock,
+        "default" => Availability::Unknown(UnknownReason::PickupPending),
         other => Availability::Unknown(UnknownReason::SchemaDrift {
             field: "pickupDisplay".into(),
             raw: other.to_string(),
