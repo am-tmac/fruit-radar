@@ -256,7 +256,7 @@ struct AppState {
     orders: std::sync::Mutex<std::collections::HashSet<String>>,
     catalog: Catalog,
     http: reqwest::Client,
-    /// 设置的内存副本。写盘失败不该让界面卡住，所以内存副本是权威的展示来源。
+    /// 设置的内存副本。有可用的持久化存储时，只在新设置成功落盘后更新。
     settings: RwLock<Settings>,
     /// 为 `None` 表示配置不可持久化（目录不可写，或上次读取失败已放弃写盘）。
     store: Option<SettingsStore>,
@@ -275,18 +275,16 @@ impl AppState {
             .unwrap_or_else(|e| e.into_inner().clone())
     }
 
-    /// 更新内存副本并尝试落盘。落盘失败只报错，不回滚内存 ——
-    /// 用户的操作已经生效了，没道理因为磁盘问题把界面弹回去。
+    /// 先落盘再更新内存副本。否则 Windows 上文件被占用或权限异常时，
+    /// 界面、监控引擎和下次启动读到的设置会变成三份不同的状态。
     fn put_settings(&self, next: Settings) -> Result<(), String> {
+        if let Some(store) = &self.store {
+            store.save(&next).map_err(|e| e.to_string())?;
+        }
+
         let mut guard = self.settings.write().unwrap_or_else(|e| e.into_inner());
         *guard = next;
-        let to_save = guard.clone();
-        drop(guard);
-
-        match &self.store {
-            Some(store) => store.save(&to_save).map_err(|e| e.to_string()),
-            None => Ok(()),
-        }
+        Ok(())
     }
 }
 
@@ -539,8 +537,8 @@ async fn refresh_products(
     let before = next.targets.clone();
     state.catalog.hydrate_watch_targets(&mut next.targets);
     if next.targets != before {
-        state.watcher.set_targets(next.targets.clone()).await;
-        state.put_settings(next)?;
+        state.put_settings(next.clone())?;
+        state.watcher.set_targets(next.targets).await;
     }
     Ok(count)
 }
@@ -561,7 +559,8 @@ async fn save_settings(
     next.normalize();
     state.catalog.hydrate_watch_targets(&mut next.targets);
 
-    // 设置里的目标列表和查询间隔要同步给引擎，否则改完设置监控还按旧的跑。
+    // 先成功落盘，再把同一份设置同步给引擎，避免三者分叉。
+    state.put_settings(next.clone())?;
     state.watcher.set_targets(next.targets.clone()).await;
     state.watcher.set_interval(next.interval()).await;
     state
@@ -569,7 +568,6 @@ async fn save_settings(
         .set_delivery_region(next.delivery_region.clone())
         .await;
 
-    state.put_settings(next.clone())?;
     Ok(next)
 }
 
@@ -589,8 +587,8 @@ async fn set_targets(
     next.targets = targets;
     next.normalize();
     state.catalog.hydrate_watch_targets(&mut next.targets);
-    state.watcher.set_targets(next.targets.clone()).await;
-    state.put_settings(next)?;
+    state.put_settings(next.clone())?;
+    state.watcher.set_targets(next.targets).await;
     Ok(state.watcher.snapshot().await)
 }
 
@@ -598,10 +596,10 @@ async fn set_targets(
 async fn set_interval(state: tauri::State<'_, AppState>, seconds: u64) -> Result<u64, String> {
     let _control = state.control.lock().await;
     let secs = seconds.max(MIN_INTERVAL_SECONDS);
-    state.watcher.set_interval(Duration::from_secs(secs)).await;
     let mut next = state.settings_snapshot();
     next.interval_seconds = secs;
     state.put_settings(next)?;
+    state.watcher.set_interval(Duration::from_secs(secs)).await;
     Ok(secs)
 }
 

@@ -5,6 +5,7 @@ import {
   BellRing,
   Clock3,
   Download,
+  LoaderCircle,
   LogIn,
   Pause,
   Play,
@@ -82,6 +83,7 @@ import {
   openReleasePage,
   openTargetProduct,
   refreshProducts,
+  removeTarget,
   saveSettings,
   setCategory,
   setIntervalSeconds,
@@ -299,6 +301,8 @@ export default function App() {
   const [storeNumbers, setStoreNumbers] = useState<string[]>([]);
   const [partNumbers, setPartNumbers] = useState<string[]>([]);
   const [isAdding, setIsAdding] = useState(false);
+  const [removingTargetKeys, setRemovingTargetKeys] = useState<Set<string>>(() => new Set());
+  const [removeError, setRemoveError] = useState<string | null>(null);
   const [barkDraft, setBarkDraft] = useState<string | null>(null);
   const [intervalDraft, setIntervalDraft] = useState<number | null>(null);
   // 清空取货信息后要靠它重挂载输入框，否则非受控的输入框还显示旧值。
@@ -426,7 +430,21 @@ export default function App() {
   }
 
   async function onRemove(target: Target) {
-    await setTargets(targets.filter((item) => targetKey(item) !== targetKey(target)));
+    const key = targetKey(target);
+    setRemoveError(null);
+    setRemovingTargetKeys((current) => new Set(current).add(key));
+    try {
+      const removed = await removeTarget(target);
+      if (!removed) {
+        setRemoveError(`未能删除“${target.productName}”，请查看活动日志中的具体原因后重试。`);
+      }
+    } finally {
+      setRemovingTargetKeys((current) => {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
+    }
   }
 
   // 日志是唯一的原始记录：颜色靠当前行反查标签，不在这里另抄一份状态文案。
@@ -746,6 +764,13 @@ export default function App() {
                         </span>
                       </div>
 
+                      {removeError ? (
+                        <div role="alert" className="flex shrink-0 items-start gap-2 border-y border-destructive/20 bg-destructive/8 px-5 py-2.5 text-xs leading-5 text-destructive">
+                          <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+                          <span>{removeError}</span>
+                        </div>
+                      ) : null}
+
                       <ScrollArea className="min-h-0 flex-1">
                         <Table className="data-table min-w-[46rem] table-fixed text-[13.5px]">
                           <TableHeader className="sticky top-0 z-10 bg-card/95">
@@ -776,8 +801,11 @@ export default function App() {
                                 </TableCell>
                               </TableRow>
                             ) : (
-                              sortedRows.map((row) => (
-                                <TableRow key={targetKey(row.target)} className="group border-0 hover:bg-muted/40">
+                              sortedRows.map((row) => {
+                                const rowKey = targetKey(row.target);
+                                const removing = removingTargetKeys.has(rowKey);
+                                return (
+                                <TableRow key={rowKey} className="group border-0 hover:bg-muted/40">
                                   <TableCell className="overflow-hidden py-3.5 pr-2 pl-5">
                                     <button
                                       type="button"
@@ -831,16 +859,18 @@ export default function App() {
                                         variant="ghost"
                                         size="icon-sm"
                                         className="size-7 rounded-[6px] text-muted-foreground opacity-60 hover:text-destructive group-hover:opacity-100"
-                                        aria-label="删除这条监控"
-                                        disabled={isAdding}
+                                        aria-label={removing ? "正在删除这条监控" : "删除这条监控"}
+                                        aria-busy={removing}
+                                        disabled={isAdding || removing}
                                         onClick={() => void onRemove(row.target)}
                                       >
-                                        <Trash2 />
+                                        {removing ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : <Trash2 />}
                                       </Button>
                                     </div>
                                   </TableCell>
                                 </TableRow>
-                              ))
+                                );
+                              })
                             )}
                           </TableBody>
                         </Table>
