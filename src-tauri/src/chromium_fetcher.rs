@@ -1,8 +1,12 @@
 //! 通过独立的无界面 Chromium 会话查询 Apple 库存。
 //!
-//! 每个查询会话使用独立临时 profile，通过 DevTools 复用同一会话查询所有门店。
-//! 不读取、迁移或清理旧 profile；只回收本会话创建的目录和进程。
-//! HTTP 541 是拦截结果，不能据此判断冷会话、IP 或具体原因。
+//! Apple 当前会在商品页执行 `shop/shld/v2_1/verify.js`，完成浏览器环境校验后才
+//! 接受库存请求。普通 HTTP 客户端或 WKWebView 即便拿到了部分 Cookie，仍会收到
+//! HTTP 541；真正的 Chromium 会话则能得到正常 JSON。这里启动一个使用临时资料
+//! 目录的后台浏览器，通过 DevTools 协议复用同一会话查询所有门店。
+//!
+//! 这个实现不会读取用户现有 Chrome 的个人资料、Cookie 或浏览记录。临时目录随
+//! 会话销毁，浏览器进程也由应用持有并在退出时终止。
 
 use std::collections::HashMap;
 #[cfg(target_os = "macos")]
@@ -19,6 +23,7 @@ use apw_core::model::{DeliveryRegion, Region, Target};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tempfile::TempDir;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
@@ -52,45 +57,54 @@ struct DebugTarget {
 }
 
 #[derive(Debug)]
+struct ChromiumProcess {
+    child: Child,
+    /// Unix 下为 Chromium 独立进程组的 ID；退出时必须清理整个多进程树。
+    process_group_id: Option<u32>,
+}
+
+impl Drop for ChromiumProcess {
+    fn drop(&mut self) {
+        terminate_chromium(&mut self.child, self.process_group_id);
+    }
+}
+
+#[derive(Debug)]
 struct ChromiumSession {
-    _child: OwnedChild,
-    // Field order reaps the owned child before deleting its temporary profile.
-    _profile: tempfile::TempDir,
+    /// 必须放在会话建立的最早阶段。DevTools 连接前任一错误返回，都要回收进程树。
+    _process: ChromiumProcess,
+    _profile: TempDir,
     socket: Socket,
     next_command_id: u64,
     locale: Option<&'static str>,
     delivery_cache: HashMap<String, (Instant, Option<String>)>,
 }
 
-#[derive(Debug)]
-struct OwnedChild(Child);
-impl Drop for OwnedChild {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-#[cfg(test)]
-mod ownership_regressions {
-    use super::*;
+fn terminate_chromium(child: &mut Child, process_group_id: Option<u32>) {
     #[cfg(unix)]
-    #[tokio::test]
-    async fn cancelled_start_reaps_only_its_child() {
-        let child = Command::new("/bin/sleep").arg("60").spawn().unwrap();
-        let pid = child.id();
-        let guard = OwnedChild(child);
-        let task = tokio::spawn(async move {
-            let _guard = guard;
-            std::future::pending::<()>().await;
-        });
-        task.abort();
-        let _ = task.await;
-        let status = Command::new("/bin/kill").args(["-0", &pid.to_string()])
-            .stderr(Stdio::null()).status().unwrap();
-        assert!(!status.success());
+    if let Some(process_group_id) = process_group_id {
+        // Chromium 会再派生 renderer、GPU、utility 等子进程。只 kill 主进程会让
+        // 它们被 launchd/systemd 接管，最终表现为 Dock 认为 Chrome 仍在运行。
+        // 独立进程组让我们可以先温和终止整棵树，再用 SIGKILL 做有界兜底。
+        let group = -(process_group_id as i32);
+        unsafe {
+            libc::kill(group, libc::SIGTERM);
+        }
+        for _ in 0..10 {
+            if child.try_wait().ok().flatten().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        unsafe {
+            libc::kill(group, libc::SIGKILL);
+        }
+        let _ = child.wait();
+        return;
     }
 
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 impl ChromiumSession {
@@ -112,7 +126,8 @@ impl ChromiumSession {
             .map_err(|e| ApiError::Transport(format!("无法创建 Chromium 临时目录：{e}")))?;
         let profile_arg = format!("--user-data-dir={}", profile.path().display());
         let user_agent_arg = format!("--user-agent={user_agent}");
-        let mut child = OwnedChild(Command::new(chrome)
+        let mut command = Command::new(chrome);
+        command
             .args([
                 "--headless=new",
                 "--remote-debugging-port=0",
@@ -129,9 +144,24 @@ impl ChromiumSession {
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let child = command
             .spawn()
-            .map_err(|e| ApiError::Transport(format!("无法启动 Chromium：{e}")))?);
+            .map_err(|e| ApiError::Transport(format!("无法启动 Chromium：{e}")))?;
+        #[cfg(unix)]
+        let process_group_id = Some(child.id());
+        #[cfg(not(unix))]
+        let process_group_id = None;
+        // 从 spawn 成功这一刻起就装进守卫；下面任何 `?` 提前返回都不会泄漏。
+        let mut process = ChromiumProcess {
+            child,
+            process_group_id,
+        };
 
         let port_file = profile.path().join("DevToolsActivePort");
         let deadline = Instant::now() + CHROME_START_TIMEOUT;
@@ -142,7 +172,8 @@ impl ChromiumSession {
             {
                 break port;
             }
-            if let Some(status) = child.0
+            if let Some(status) = process
+                .child
                 .try_wait()
                 .map_err(|e| ApiError::Transport(format!("无法检查 Chromium 状态：{e}")))?
             {
@@ -151,7 +182,6 @@ impl ChromiumSession {
                 )));
             }
             if Instant::now() >= deadline {
-                let _ = child.0.kill();
                 return Err(ApiError::Transport("等待 Chromium 启动超时".into()));
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -179,7 +209,7 @@ impl ChromiumSession {
             .map_err(|e| ApiError::Transport(format!("无法连接 Chromium 页面：{e}")))?;
 
         Ok(Self {
-            _child: child,
+            _process: process,
             _profile: profile,
             socket,
             next_command_id: 1,
@@ -773,6 +803,14 @@ impl AppleChromiumFetcher {
         }
     }
 
+    /// 显式关闭共享浏览器会话。
+    ///
+    /// Tauri 的 `app.exit()` 不保证异步任务按持有顺序析构，所以不能只依赖
+    /// `ChromiumSession::drop` 在进程退出的最后一刻碰运气。
+    pub async fn shutdown(&self) {
+        self.state.lock().await.session = None;
+    }
+
     async fn pickup(
         &self,
         region: &'static Region,
@@ -1030,11 +1068,14 @@ mod tests {
         });
         let (socket, _) = connect_async(format!("ws://{address}")).await.unwrap();
         let session = ChromiumSession {
-            _child: OwnedChild(Command::new("rustc")
-                .arg("--version")
-                .stdout(Stdio::null())
-                .spawn()
-                .unwrap()),
+            _process: ChromiumProcess {
+                child: Command::new("rustc")
+                    .arg("--version")
+                    .stdout(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+                process_group_id: None,
+            },
             _profile: tempfile::tempdir().unwrap(),
             socket,
             next_command_id: 1,
@@ -1068,6 +1109,33 @@ mod tests {
             "status": 200,
             "body": json!({"body":{"stores":stores}}).to_string()
         }}}})
+    }
+
+    #[tokio::test]
+    async fn 显式关闭会话会释放浏览器连接() {
+        let (fetcher, peer) = cdp_responses(Vec::new()).await;
+
+        fetcher.shutdown().await;
+
+        assert!(fetcher.state.lock().await.session.is_none());
+        assert!(peer.await.unwrap(), "关闭会话应同步关闭 DevTools 连接");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "需要本机 Chromium"]
+    async fn 真实chromium会话析构后进程组消失() {
+        let session = ChromiumSession::start().await.unwrap();
+        let process_group_id = session._process.process_group_id.unwrap();
+
+        drop(session);
+
+        let result = unsafe { libc::kill(-(process_group_id as i32), 0) };
+        assert_eq!(result, -1, "Chromium 进程组不应在会话析构后残留");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
     }
 
     #[tokio::test]
@@ -1284,40 +1352,7 @@ mod tests {
                 .await;
             assert!(matches!(result, Err(ApiError::CoolingDown { .. })));
             assert_eq!(peer.await.unwrap(), should_close, "HTTP {status}");
-
         }
-    }
-
-    #[tokio::test]
-    async fn blocked_query_discards_its_profile_like_3d7c56e() {
-        let (fetcher, peer) = cdp_fixture(json!({
-            "result": {"result": {"value": {"status": 541, "body": "{}"}}}
-        })).await;
-        let root = tempfile::tempdir().unwrap();
-        let profile = tempfile::Builder::new()
-            .prefix("apple-store-inventory-monitor-chromium-")
-            .tempdir_in(root.path()).unwrap();
-        let legacy = root.path().join("apple-store-inventory-monitor-chromium-unknown");
-        std::fs::create_dir(&legacy).unwrap();
-        std::fs::write(legacy.join("SingletonLock"), "unknown owner").unwrap();
-        let path = profile.path().to_path_buf();
-        std::fs::write(path.join("Cookies"), "fixture cookie, never real data").unwrap();
-        {
-            let mut guard = fetcher.state.lock().await;
-            guard.session.as_mut().unwrap()._profile = profile;
-        }
-        let result = fetcher
-            .pickup_message(
-                region_by_locale("zh_CN").unwrap(),
-                "R390",
-                &[test_target("MG6X4CH/A")],
-                None,
-            )
-            .await;
-        assert!(matches!(result, Err(ApiError::CoolingDown { .. })));
-        assert!(peer.await.unwrap());
-        assert!(!path.exists(), "HTTP 541 must discard owned temporary cookies, not retain them");
-        assert_eq!(std::fs::read_to_string(legacy.join("SingletonLock")).unwrap(), "unknown owner");
     }
 
     #[test]

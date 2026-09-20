@@ -250,6 +250,7 @@ struct CategoryDto {
 
 struct AppState {
     watcher: Watcher,
+    fetcher: AppleChromiumFetcher,
     control: tokio::sync::Mutex<()>,
     admission: std::sync::Mutex<automation::Admission>,
     order_watch: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -1281,7 +1282,17 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => reveal_window(app),
-            "quit" => app.exit(0),
+            "quit" => {
+                let state = app.state::<AppState>();
+                let watcher = state.watcher.clone();
+                let fetcher = state.fetcher.clone();
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    watcher.stop().await;
+                    fetcher.shutdown().await;
+                    app.exit(0);
+                });
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -1402,8 +1413,8 @@ pub fn run() {
                 delivery_region: settings.delivery_region.clone(),
                 ..WatcherConfig::default()
             };
-            let (watcher, events, engine) =
-                Watcher::new(AppleChromiumFetcher::new(), watcher_config);
+            let fetcher = AppleChromiumFetcher::new();
+            let (watcher, events, engine) = Watcher::new(fetcher.clone(), watcher_config);
             tauri::async_runtime::spawn(engine);
 
             {
@@ -1421,6 +1432,7 @@ pub fn run() {
 
             app.manage(AppState {
                 watcher,
+                fetcher,
                 control: tokio::sync::Mutex::new(()),
                 admission: std::sync::Mutex::new(automation::Admission::default()),
                 order_watch: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
