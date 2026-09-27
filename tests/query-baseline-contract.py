@@ -1,13 +1,17 @@
 """Offline source-level differential contract. Never launches Chromium or Apple requests.
 
-这里刻意有两条基线，`3d7c56e` 和上游 `09a4e31`：
+这里刻意有两条基线，`3d7c56e` 和上游 `04e646d`（v1.0.15）：
 
 - `FORK_BASE = 3d7c56e`：fork 自己拥有的部分（浏览器选择）仍然逐字对照用户验过的版本。
-- `UPSTREAM_BASE = 09a4e31`：查询路径（CDP 准备与握手、启动超时、请求与状态分类）
+- `UPSTREAM_BASE = 04e646d`：查询路径（CDP 准备与握手、启动超时、请求与状态分类）
   现在的负责人是上游 —— 本次合并正是为了接入它的请求节流、403/429/541 分级保护
   冷却、冷却结束后的恢复探测以及零件号分批。继续拿 `3d7c56e` 当基线会必然变红，
   但那不是回归，而是这次有意改掉的东西；拿上游当基线才能继续拦住「再有人悄悄改动
   查询语义」这类真正的漂移。
+
+  基线从 `09a4e31` 前移到 `04e646d`：v1.0.14 `62b4b78` 把门店取货改走
+  `/shop/retail/pickup-message`，送货仍走 `fulfillment-messages` 且失败不覆盖取货结论；
+  v1.0.15 `04e646d` 区分海外站会话页并新增「暂停取货」。两者随本次选择性移植接入。
 
   `start()` 现在与上游一致（仅保留 fork 的 OwnedChild RAII 归一化）：临时 profile
   与子进程的所有权仍在 fork 手里，但会话状态结构已随上游扩展（冷却、批量复用、
@@ -26,7 +30,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PATH = "src-tauri/src/chromium_fetcher.rs"
 FORK_BASE_REV = "3d7c56e"
-UPSTREAM_BASE_REV = "09a4e31"
+UPSTREAM_BASE_REV = "04e646d"
 
 FORK_BASE = subprocess.check_output(["git", "show", f"{FORK_BASE_REV}:{PATH}"], cwd=ROOT, text=True)
 UPSTREAM_BASE = subprocess.check_output(["git", "show", f"{UPSTREAM_BASE_REV}:{PATH}"], cwd=ROOT, text=True)

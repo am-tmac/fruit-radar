@@ -143,6 +143,7 @@ fn target(store: &str, part: &str) -> Target {
         companion_part: None,
         companion_name: None,
         kit_part: None,
+        pickup_location: None,
     }
 }
 
@@ -408,6 +409,37 @@ async fn 查询失败必须落到未知而不是无货() {
         events.iter().any(|e| matches!(e, Event::Trouble { .. })),
         "被拦截时必须发告警，否则用户不知道界面上的状态已经不可信"
     );
+}
+
+#[tokio::test]
+async fn 门店暂停在线取货不算查询故障也不弹全局告警() {
+    let fake = FakeFetcher::new(|_, store, _| {
+        Err(ApiError::StorePickupUnavailable {
+            store_number: store.into(),
+        })
+    });
+    let (watcher, mut rx) = Watcher::spawn(fake, fast_config());
+    watcher.set_targets(vec![target("R384", "MJXT4X/A")]).await;
+    watcher.start().await;
+
+    let events = wait_cycle(&mut rx).await;
+    watcher.stop().await;
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::CycleComplete { healthy: true, .. }))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Trouble { .. }))
+    );
+    assert!(matches!(
+        watcher.snapshot().await[0].availability,
+        Availability::Unknown(UnknownReason::StorePickupUnavailable { ref store_number })
+            if store_number == "R384"
+    ));
 }
 
 #[tokio::test]

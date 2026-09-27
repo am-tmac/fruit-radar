@@ -80,6 +80,12 @@ fn 未知状态会扁平成两层判别字段() {
             json!({"kind": "unknown", "reason": "schema_drift", "field": "pickupDisplay", "raw": "weird"}),
         ),
         (
+            UnknownReason::StorePickupUnavailable {
+                store_number: "R384".into(),
+            },
+            json!({"kind": "unknown", "reason": "store_pickup_unavailable", "store_number": "R384"}),
+        ),
+        (
             UnknownReason::AppleError {
                 message: "boom".into(),
             },
@@ -115,6 +121,7 @@ fn 跨边界的结构统一用小驼峰() {
         companion_part: None,
         companion_name: None,
         kit_part: None,
+        pickup_location: None,
     };
     assert_eq!(
         to_value(&target),
@@ -148,6 +155,9 @@ fn 跨边界的结构统一用小驼峰() {
         number: "R683".into(),
         name: "环球港".into(),
         title: "上海-环球港".into(),
+        city: "上海".into(),
+        state: "上海".into(),
+        postal_code: "200062".into(),
     };
     assert!(to_value(&store).get("number").is_some());
 }
@@ -238,6 +248,7 @@ fn 监控目标能原样往返() {
         companion_part: None,
         companion_name: None,
         kit_part: None,
+        pickup_location: None,
     };
     let json = serde_json::to_string(&target).unwrap();
     let back: Target = serde_json::from_str(&json).expect("反序列化失败");

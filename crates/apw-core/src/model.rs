@@ -59,6 +59,7 @@ impl Availability {
             Self::Unknown(UnknownReason::NotYetChecked) => "待查询",
             Self::Unknown(UnknownReason::PickupPending) => "待开放取货",
             Self::Unknown(UnknownReason::NoPickupData { .. }) => "暂无数据",
+            Self::Unknown(UnknownReason::StorePickupUnavailable { .. }) => "暂停取货",
             Self::Unknown(UnknownReason::ProductNotReturned { .. }) => "未返回型号",
             Self::Unknown(UnknownReason::CoolingDown { .. }) => "冷却中",
             Self::Unknown(_) => "未知",
@@ -106,6 +107,8 @@ pub enum UnknownReason {
     SchemaDrift { field: String, raw: String },
     /// 已知取货节点为空，不代表无货，也不代表接口结构变化。
     NoPickupData { store_number: String },
+    /// Apple 明确表示该门店当前没有关联在线取货搜索。
+    StorePickupUnavailable { store_number: String },
     /// 门店返回了其他商品，但没有返回请求的零件号。
     ProductNotReturned { part_number: String },
     /// Apple 明确返回了一条业务错误信息。
@@ -134,6 +137,9 @@ impl UnknownReason {
             Self::NoPickupData { store_number } => format!(
                 "Apple 暂未提供门店 {store_number} 的取货数据；请刷新型号目录并核对官网是否仍销售该型号、是否已开放取货，暂无数据不等于无货"
             ),
+            Self::StorePickupUnavailable { store_number } => format!(
+                "Apple 当前未将门店 {store_number} 接入在线取货；门店可能临时关闭或暂停取货，不能据此判断库存"
+            ),
             Self::ProductNotReturned { part_number } => {
                 format!("Apple 本次门店响应未包含型号 {part_number}；暂无库存结论，不能视为无货")
             }
@@ -147,7 +153,10 @@ impl UnknownReason {
     /// `NotYetChecked` 只是还没轮到，`PickupPending` 是 Apple 尚未开放取货；
     /// 两者都不该被算进失败数，也不该触发告警或退避。
     pub fn is_failure(&self) -> bool {
-        !matches!(self, Self::NotYetChecked | Self::PickupPending)
+        !matches!(
+            self,
+            Self::NotYetChecked | Self::PickupPending | Self::StorePickupUnavailable { .. }
+        )
     }
 }
 
@@ -258,10 +267,34 @@ pub struct Region {
 }
 
 impl Region {
+    /// 用于建立在线商店浏览器会话的页面。
+    ///
+    /// 中国大陆的送货接口仍依赖购买页建立的在线商店会话；只访问地区首页会让
+    /// `/shop/fulfillment-messages` 返回 HTTP 541。部分海外站点则会直接拒绝
+    /// 自动化浏览器打开 `/shop/buy-*`，但地区首页与取货接口可以正常使用。
+    /// 因此中国大陆保留购买页暖场，海外站点使用地区首页。
+    pub fn session_page_url(&self) -> String {
+        if self.locale == "zh_CN" {
+            self.families.first().map_or_else(
+                || format!("{}/", self.base_url),
+                |family| self.buy_page_url(family),
+            )
+        } else {
+            format!("{}/", self.base_url)
+        }
+    }
+
     /// 取货状态查询接口地址。
     pub fn pickup_message_url(&self) -> String {
-        // Apple 当前商品页的 fulfillmentBootstrap.pickupURL 明确指向这里。
-        // 这个端点必须在真实网页会话完成 shld 握手后访问；具体传输由宿主负责。
+        format!("{}/shop/retail/pickup-message", self.base_url)
+    }
+
+    /// 送货说明查询仍使用购买页的 fulfillment 接口。
+    ///
+    /// 取货与送货必须分开：旧 fulfillment 接口会按地区或边缘节点返回空门店
+    /// 数据甚至 HTTP 541，不能再让它决定门店库存；但它返回的配送文案仍可作为
+    /// 尽力而为的附加信息，失败时不影响取货结论。
+    pub fn delivery_message_url(&self) -> String {
         format!("{}/shop/fulfillment-messages", self.base_url)
     }
 
@@ -482,6 +515,31 @@ pub struct Store {
     pub name: String,
     /// 界面展示名，如「上海-环球港」。
     pub title: String,
+    /// 只用于拼取货接口的 `location` 参数，不暴露给前端。
+    #[serde(skip)]
+    pub city: String,
+    /// 只用于拼取货接口的 `location` 参数，不暴露给前端。
+    #[serde(skip)]
+    pub state: String,
+    /// 日本等站点优先使用邮编查询附近门店。
+    #[serde(skip)]
+    pub postal_code: String,
+}
+
+impl Store {
+    /// 返回 Apple 取货接口可接受的附近门店查询地点。
+    pub fn pickup_location(&self, locale: &str) -> Option<String> {
+        let city = self.city.trim();
+        let state = self.state.trim();
+        let postal = self.postal_code.trim();
+        let pick = |value: &str| (!value.is_empty()).then(|| value.to_string());
+        match locale {
+            // 大陆站只写城市会被拒绝，必须使用「省 市」。
+            "zh_CN" => (!state.is_empty() && !city.is_empty()).then(|| format!("{state} {city}")),
+            "ja_JP" => pick(postal).or_else(|| pick(city)),
+            _ => pick(city).or_else(|| pick(postal)),
+        }
+    }
 }
 
 /// 一条监控目标：在某地区的某门店盯某个型号。
@@ -500,6 +558,11 @@ pub struct Target {
     pub companion_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kit_part: Option<String>,
+    /// 运行时由门店目录补齐，用于把同城门店合并成一次附近查询。
+    ///
+    /// 不写入配置，也不传给前端；旧设置读入后会重新从内置门店表补齐。
+    #[serde(skip)]
+    pub pickup_location: Option<String>,
 }
 
 impl Target {
@@ -602,6 +665,10 @@ mod tests {
         let cn = region_by_locale("zh_CN").expect("地区表里应当有中国大陆");
         assert_eq!(
             cn.pickup_message_url(),
+            "https://www.apple.com.cn/shop/retail/pickup-message"
+        );
+        assert_eq!(
+            cn.delivery_message_url(),
             "https://www.apple.com.cn/shop/fulfillment-messages"
         );
         // 中国大陆用独立域名，不能是 apple.com/cn —— 那正是上游拼错的地方。
@@ -634,6 +701,7 @@ mod tests {
             companion_part: None,
             companion_name: None,
             kit_part: None,
+            pickup_location: None,
         };
         assert_ne!(mk("MG724CH/A").key(), mk("MG0A4CH/A").key());
         assert_eq!(mk("MG724CH/A").key(), mk("MG724CH/A").key());

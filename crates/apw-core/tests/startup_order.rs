@@ -15,7 +15,7 @@ impl Fetcher for RecordingFetcher {
 async fn probe(auto_start: bool) -> (Vec<(String, String, Vec<String>)>, Vec<String>) {
     let fetcher = RecordingFetcher::default();
     let (watcher, mut events) = Watcher::spawn(fetcher.clone(), WatcherConfig { interval: Duration::from_secs(3600), jitter: 0.0, ..Default::default() });
-    watcher.set_targets(["TEST-B/A", "TEST-A/A"].into_iter().map(|part| Target { locale: "zh_CN".into(), store_number: "R390".into(), store_title: "Offline".into(), part_number: part.into(), product_name: "Offline".into(), companion_part: None, companion_name: None, kit_part: None }).collect()).await;
+    watcher.set_targets(["TEST-B/A", "TEST-A/A"].into_iter().map(|part| Target { locale: "zh_CN".into(), store_number: "R390".into(), store_title: "Offline".into(), part_number: part.into(), product_name: "Offline".into(), companion_part: None, companion_name: None, kit_part: None, pickup_location: None }).collect()).await;
     watcher.set_interval(Duration::from_secs(3600)).await;
     assert!(!watcher.is_running().await); // actor barrier, no wall-clock sleep
     assert!(fetcher.0.lock().unwrap().is_empty());

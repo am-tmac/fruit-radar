@@ -8,7 +8,8 @@ export function describeMonitorStatus(row: Pick<TargetState, "availability" | "p
   const base = describeAvailability(a);
   if (a.kind === "unknown") {
     const labels: Record<string, string> = {
-      no_pickup_data: "暂无取货数据", product_not_returned: "未返回型号",
+      no_pickup_data: "暂无取货数据", store_pickup_unavailable: "暂停取货",
+      product_not_returned: "未返回型号",
       blocked: "请求被拦截", rate_limited: "请求被限流",
       transport: "查询失败", schema_drift: "响应解析失败", apple_error: "Apple 返回错误",
     };
