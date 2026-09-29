@@ -1,6 +1,6 @@
 # 水果雷达（Fruit Radar）
 
-当前分支版本：**1.1.1**（在上游 v1.0.6 展示改进之上，选择性移植 v1.0.7–v1.0.10 的请求保护冷却、请求预算/节流、冷却期「立即重试」与零件号分批查询，以及 v1.0.14–v1.0.15 的新门店取货接口与「暂停取货」状态，同时保留手动开始 + 独立临时查询 profile 修正与水果雷达界面改版）。版本号独立于上游；下方历史截图及上游安装说明不代表本分支已发布安装包。
+当前分支版本：**1.2.0**（在 1.1.1 基础上移植上游 v1.0.16–v1.0.19：持久专属查询会话、同城合并查询、送货缓存、在线刷新门店/型号、可选 Clash 指定节点/轮换、设置面板折叠与可关闭的失败退避；在上游 v1.0.6 展示改进之上，选择性移植 v1.0.7–v1.0.10 的请求保护冷却、请求预算/节流、冷却期「立即重试」与零件号分批查询，以及 v1.0.14–v1.0.15 的新门店取货接口与「暂停取货」状态，同时保留手动开始 + 独立临时查询 profile 修正与水果雷达界面改版）。版本号独立于上游；下方历史截图及上游安装说明不代表本分支已发布安装包。
 
 > **这是 [suversal/apple-store-inventory-monitor](https://github.com/suversal/apple-store-inventory-monitor)（果到雷达 v1.0.4）的修改分支，由 am-tmac 维护，不是上游官方版本。**
 >
@@ -21,7 +21,7 @@
 
 果到雷达是一款 Apple 直营店取货库存监控工具。选好地区、门店和具体型号后，它会定时检查库存；检测到有货时，可以播放提示音、推送 Bark，并按你的选择打开 Apple 购物袋或商品详情。
 
-上游支持 macOS、Windows 和 Linux，使用 Rust、Tauri 2 和 React 编写。本 README 对应水果雷达 **1.1.1** 源码；上游英文应用名为 **Apple Store Inventory Monitor**，仓库名为 `apple-store-inventory-monitor`。
+上游支持 macOS、Windows 和 Linux，使用 Rust、Tauri 2 和 React 编写。本 README 对应水果雷达 **1.2.0** 源码；上游英文应用名为 **Apple Store Inventory Monitor**，仓库名为 `apple-store-inventory-monitor`。
 
 基于 [ENCHIGO/apple-pickup-watcher v0.3.2](https://github.com/ENCHIGO/apple-pickup-watcher/tree/v0.3.2) 继续开发，按 GPL-3.0-or-later 发布。来源与修改记录见 [NOTICE](NOTICE)。
 
@@ -90,7 +90,7 @@ codesign --verify --deep --strict target/release/bundle/macos/水果雷达.app
 
 ## 安装
 
-以下为上游安装说明及历史版本记录。本分支 1.1.1 当前仅准备源码与本地 macOS 构建包，未据此发布 Release；不要把上游历史版本的签名问题等同于本分支。
+以下为上游安装说明及历史版本记录。本分支 1.2.0 当前仅准备源码与本地 macOS 构建包，未据此发布 Release；不要把上游历史版本的签名问题等同于本分支。
 
 打开 [最新正式版本](https://github.com/suversal/apple-store-inventory-monitor/releases/latest)，在 **Assets** 中下载对应系统的安装包。每个版本的变化见 [更新记录](CHANGELOG.md)。
 
