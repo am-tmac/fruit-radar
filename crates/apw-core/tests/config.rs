@@ -98,6 +98,8 @@ fn 样例设置() -> Settings {
             .collect(),
         sound_enabled: false,
         open_on_hit: OpenOnHit::Product,
+        network: apw_core::config::NetworkSettings::default(),
+        backoff_enabled: true,
         auto_add_to_bag: true,
         bag_applecare: true,
         pickup_last_name: "FixtureLast".into(),
@@ -606,6 +608,8 @@ fn 设置的线上格式是小驼峰() {
         "productBarkUrls",
         "soundEnabled",
         "openOnHit",
+        "network",
+        "backoffEnabled",
         "autoAddToBag",
         "bagApplecare",
         "pickupLastName",
@@ -619,7 +623,9 @@ fn 设置的线上格式是小驼峰() {
     assert!(!obj.contains_key("interval_seconds"), "不该有蛇形字段");
     assert_eq!(obj.get("openOnHit"), Some(&serde_json::json!("product")));
     assert!(!obj.contains_key("openBagOnHit"));
-    assert_eq!(obj.len(), 15);
+    assert_eq!(obj.get("backoffEnabled"), Some(&serde_json::json!(true)));
+    assert_eq!(obj["network"]["mode"], "system");
+    assert_eq!(obj.len(), 17);
 }
 
 #[test]
@@ -686,4 +692,18 @@ fn 配置文件路径落在用户配置目录下() {
             .path()
             .ends_with(Path::new("apple-store-inventory-monitor").join("settings.v2.json"))
     );
+}
+
+#[test]
+fn old_settings_keep_system_network_and_backoff_and_opt_in_roundtrips() {
+    let defaults: Settings = serde_json::from_str(r#"{"locale":"zh_CN"}"#).unwrap();
+    assert!(defaults.backoff_enabled);
+    assert_eq!(defaults.network.mode, apw_core::config::NetworkMode::System);
+    let dir = 临时目录::new("query-policy");
+    let store = SettingsStore::at(dir.设置路径());
+    let mut strict = defaults;
+    strict.backoff_enabled = false;
+    strict.network.mode = apw_core::config::NetworkMode::Clash;
+    store.save(&strict).unwrap();
+    assert_eq!(store.load().unwrap(), strict);
 }

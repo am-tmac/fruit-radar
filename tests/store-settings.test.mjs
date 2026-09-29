@@ -26,6 +26,8 @@ const defaults = {
   locale: "zh_CN", targets: [], intervalSeconds: 30,
   barkUrl: "https://example.invalid/old", soundEnabled: true, openOnHit: "bag",
   productBarkUrls: {},
+  network: { mode: "system", clash: { controller: "http://127.0.0.1:9097", secret: "", group: "水果雷达", proxyPort: 7899, nodeFilter: "", pinnedNode: "DIRECT" } },
+  backoffEnabled: true,
   autoAddToBag: false, bagApplecare: false,
   pickupLastName: "", pickupFirstName: "", pickupEmail: "", pickupPhone: "", pickupIdLast4: "",
 };
@@ -209,5 +211,30 @@ test("activity log lines are also written to disk, timestamped", async () => {
   // 「这条告警发生在几点」。少了时间戳，日志就退化成一份没用的清单。
   for (const line of lines) {
     assert.match(line, /^\[\d{2}:\d{2}:\d{2}\] \S/, `日志行缺少时间戳：${line}`);
+  }
+});
+
+
+test("catalog refresh reports independent failures and reloads stores and products", async () => {
+  for (const result of [
+    { products: 7, stores: null, errors: ["门店列表：offline failure"] },
+    { products: 0, stores: 49, errors: ["型号目录：offline failure"] },
+  ]) {
+    const { store } = await setup();
+    const calls = [];
+    invoke = async command => {
+      calls.push(command);
+      if (command === "refresh_products") return result;
+      if (command === "get_settings") return defaults;
+      return [];
+    };
+    await store.refreshProducts();
+    assert.ok(calls.includes("list_stores"));
+    assert.ok(calls.includes("list_products"));
+    assert.equal(store.watcherStore.getSnapshot().refreshing, false);
+    const log = store.watcherStore.getSnapshot().logs.join("\n");
+    assert.ok(log.includes(`型号 ${result.products} 个`), log);
+    assert.ok(log.includes(result.stores === null ? "门店未更新" : "门店 49 家"), log);
+    assert.ok(log.includes(result.errors[0]), log);
   }
 });

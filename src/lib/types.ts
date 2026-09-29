@@ -88,7 +88,58 @@ export interface Store {
 /** 检测到有货时自动打开的页面，与 Rust 侧 `OpenOnHit` 一一对应。 */
 export type OpenOnHit = "none" | "bag" | "product";
 
+export type NetworkMode = "system" | "pinned" | "clash";
+
+export interface ClashSettings {
+  controller: string;
+  secret: string;
+  group: string;
+  proxyPort: number;
+  /** 节点名关键词，用 | 分隔；为空表示全部节点。 */
+  nodeFilter: string;
+  /** 「指定节点」模式固定使用的节点。 */
+  pinnedNode: string;
+}
+
+export interface NetworkSettings {
+  mode: NetworkMode;
+  clash: ClashSettings;
+}
+
+/** 本机 Clash 线路检查结果，不代表 Apple 一定接受这些节点。 */
+export interface ClashRouteCheck {
+  version: string;
+  now: string | null;
+  nodes: string[];
+  skipped: number;
+  portOpen: boolean;
+  /** 批量测速超时的节点数；切换时会逐个复测，超时节点不会被切换过去。 */
+  timeoutCount: number;
+}
+
+/** 专用策略组中的一个节点。 */
+export interface RouteInfo {
+  name: string;
+  /** 批量测速延迟（毫秒）；超时或 DIRECT 为 null。 */
+  delay: number | null;
+  /** 被 Apple 拒绝后冷却中，或暂时连不通。 */
+  resting: boolean;
+}
+
+export interface RouteList {
+  now: string | null;
+  nodes: RouteInfo[];
+}
+
+export interface CatalogRefresh {
+  products: number;
+  stores: number | null;
+  errors: string[];
+}
+
 export interface Settings {
+  network: NetworkSettings;
+  backoffEnabled: boolean;
   locale: string;
   targets: Target[];
   intervalSeconds: number;
@@ -150,6 +201,7 @@ export type WatcherEvent =
       reusedResponseCount: number;
       nextCheckInSecs: number;
       cooling: boolean;
+      route?: string;
       healthy: boolean;
       snapshot: TargetState[];
     }
@@ -162,7 +214,7 @@ export function describeAdvice(advice: TroubleAdvice): string {
     case "try_another_network":
       return (
         "Apple 拒绝了这次查询，尚不能确定是会话、请求频率还是网络原因。" +
-        "程序会延长重试间隔；若持续失败，可重启应用后重试，并对照官网或其他网络检查。"
+        "默认保护退避；若关闭退避则按设置间隔重试，持续请求可能延长限制。可暂停并对照官网或其他网络检查。"
       );
     case "wait_for_retry":
       return "程序已暂停当前地区的真实请求，冷却结束后会自动进行一次恢复探测，无需手动重启。";

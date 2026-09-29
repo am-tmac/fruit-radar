@@ -207,6 +207,7 @@ impl Fetcher for ProtectedFetcher {
         CycleStats {
             request_count: 3,
             reused_response_count: 2,
+            route: None,
         }
     }
 
@@ -1158,4 +1159,48 @@ async fn 业务说明随本轮快照传递且失败后清除() {
         second_row.pickup_details.is_none(),
         "本轮失败不能继续显示上一轮未发售详情"
     );
+}
+
+#[derive(Clone)]
+struct PolicyFetcher(bool);
+impl Fetcher for PolicyFetcher {
+    async fn backoff_enabled(&self) -> bool {
+        self.0
+    }
+    async fn pickup_message(
+        &self,
+        _: &'static Region,
+        _: &str,
+        _: &[Target],
+        _: Option<&DeliveryRegion>,
+    ) -> Result<StoreAvailability, ApiError> {
+        Err(ApiError::Blocked("offline 541".into()))
+    }
+}
+#[tokio::test]
+async fn strict_interval_is_exact_even_on_failure_with_default_jitter() {
+    for (enabled, expected) in [(false, 30), (true, 60)] {
+        let (watcher, mut events) = Watcher::spawn(
+            PolicyFetcher(enabled),
+            WatcherConfig {
+                interval: Duration::from_secs(30),
+                jitter: if enabled { 0.0 } else { 1.0 },
+                ..fast_config()
+            },
+        );
+        watcher.set_targets(vec![target("R683", "TEST/A")]).await;
+        watcher.start().await;
+        let cycle = wait_cycle(&mut events).await;
+        let delay = cycle
+            .iter()
+            .find_map(|event| match event {
+                Event::CycleComplete {
+                    next_check_in_secs, ..
+                } => Some(*next_check_in_secs),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(delay, expected);
+        watcher.stop().await;
+    }
 }

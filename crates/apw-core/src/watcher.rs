@@ -117,6 +117,9 @@ pub enum Event {
         next_check_in_secs: u64,
         /// 当前目标地区中是否仍有 Apple 查询保护冷却。
         cooling: bool,
+        /// 本轮使用的出口线路说明；跟随系统代理时省略。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        route: Option<String>,
         /// 本轮是否所有目标都拿到了明确答复。
         ///
         /// 界面需要一个明确的「恢复」信号才能收起故障告警。用「所有行都没有
@@ -324,7 +327,7 @@ struct StoreOutcome {
     store_number: String,
     /// 每个**请求过**的零件号对应的判定结果。
     parts: Vec<(String, Availability, Option<PickupDetails>)>,
-    /// 这次门店查询是否算成功，用于全局退避判断。
+    /// 这次门店查询是否算成功，用于判断整轮是否健康。
     ok: bool,
     /// 本次遇到的异常数量，用于判断整轮是否健康。
     problems: usize,
@@ -359,6 +362,8 @@ async fn run_queries<F: Fetcher>(
     delivery_region: Option<DeliveryRegion>,
 ) -> Vec<StoreOutcome> {
     client.begin_cycle().await;
+    let query_targets: Vec<_> = groups.iter().map(|group| group.targets.clone()).collect();
+    client.plan_cycle(&query_targets).await;
     let sem = Arc::new(Semaphore::new(concurrency.max(1)));
     let mut set = JoinSet::new();
 
@@ -584,13 +589,9 @@ struct Engine<F: Fetcher> {
     targets: Vec<Target>,
     states: BTreeMap<TargetKey, TargetState>,
     running: bool,
-    /// 连续「整轮全败」的次数，用于全局退避。
-    ///
-    /// 不用单个目标的失败次数来驱动：某个零件号下架会让它永远失败，据此退避
-    /// 的话，一条陈旧的监控项就能把所有正常门店的查询频率拖慢八倍。
-    cycle_failures: u32,
     /// 当前监控会话已经开始的轮次数。暂停后重新开始会从 1 重新计数。
     cycle_number: u64,
+    cycle_failures: u32,
 }
 
 impl<F: Fetcher> Engine<F> {
@@ -602,8 +603,8 @@ impl<F: Fetcher> Engine<F> {
             targets: Vec::new(),
             states: BTreeMap::new(),
             running: false,
-            cycle_failures: 0,
             cycle_number: 0,
+            cycle_failures: 0,
         }
     }
 
@@ -640,6 +641,7 @@ impl<F: Fetcher> Engine<F> {
                 store_count,
                 target_count: expected.len(),
             });
+            let queried_delivery_region = self.config.delivery_region.clone();
             let queries = run_queries(
                 self.client.clone(),
                 groups,
@@ -666,7 +668,9 @@ impl<F: Fetcher> Engine<F> {
                 }
             };
 
-            let Some(outcomes) = outcomes else { continue };
+            let Some(mut outcomes) = outcomes else {
+                continue;
+            };
 
             let stats = self.client.cycle_stats().await;
             let schedule_hint = self.client.schedule_hint(&locales).await;
@@ -686,6 +690,16 @@ impl<F: Fetcher> Engine<F> {
                         aborted = true;
                     }
                     other => self.handle_command(other).await,
+                }
+            }
+            if queried_delivery_region != self.config.delivery_region {
+                for outcome in &mut outcomes {
+                    for (_, _, details) in &mut outcome.parts {
+                        if let Some(details) = details {
+                            details.sale_reason = None;
+                            details.sale_message = None;
+                        }
+                    }
                 }
             }
             if aborted {
@@ -725,7 +739,17 @@ impl<F: Fetcher> Engine<F> {
                     self.config.interval = d;
                 }
             }
-            Command::SetDeliveryRegion(region) => self.config.delivery_region = region,
+            Command::SetDeliveryRegion(region) => {
+                if region != self.config.delivery_region {
+                    for state in self.states.values_mut() {
+                        if let Some(details) = &mut state.pickup_details {
+                            details.sale_reason = None;
+                            details.sale_message = None;
+                        }
+                    }
+                }
+                self.config.delivery_region = region;
+            }
             Command::Start(reply) => {
                 self.set_running(true).await;
                 let _ = reply.send(());
@@ -758,7 +782,6 @@ impl<F: Fetcher> Engine<F> {
         if running {
             self.cycle_number = 0;
         } else {
-            // 重新启动时应当从干净的节奏开始，不背着上一轮的退避。
             self.cycle_failures = 0;
         }
         self.emit_droppable(Event::RunStateChanged { running });
@@ -881,7 +904,7 @@ impl<F: Fetcher> Engine<F> {
                 });
             }
 
-            for (part, availability, pickup_details) in outcome.parts {
+            for (part, availability, mut pickup_details) in outcome.parts {
                 let key = TargetKey(format!(
                     "{}|{}|{}",
                     outcome.locale, outcome.store_number, part
@@ -891,6 +914,14 @@ impl<F: Fetcher> Engine<F> {
                 let Some(state) = self.states.get_mut(&key) else {
                     continue;
                 };
+
+                if let Some(delivery) = self
+                    .client
+                    .cached_delivery(&state.target, self.config.delivery_region.as_ref())
+                    .await
+                {
+                    delivery.merge_into(&mut pickup_details);
+                }
 
                 let previous = std::mem::replace(&mut state.availability, availability);
                 let previous_details = std::mem::replace(&mut state.pickup_details, pickup_details);
@@ -928,6 +959,13 @@ impl<F: Fetcher> Engine<F> {
                 });
                 let previous = std::mem::replace(&mut state.availability, unknown);
                 state.pickup_details = None;
+                if let Some(delivery) = self
+                    .client
+                    .cached_delivery(&state.target, self.config.delivery_region.as_ref())
+                    .await
+                {
+                    delivery.merge_into(&mut state.pickup_details);
+                }
                 state.last_checked_ms = Some(now);
                 state.consecutive_failures = state.consecutive_failures.saturating_add(1);
                 (previous != state.availability).then(|| state.clone())
@@ -938,8 +976,7 @@ impl<F: Fetcher> Engine<F> {
             }
         }
 
-        // 只有一个门店都没查成功，才认为是全局故障，进入退避。
-        if failed > 0 && ok == 0 {
+        if self.client.backoff_enabled().await && failed > 0 && ok == 0 {
             self.cycle_failures = self.cycle_failures.saturating_add(1);
         } else {
             self.cycle_failures = 0;
@@ -954,7 +991,11 @@ impl<F: Fetcher> Engine<F> {
         // 目标数超过通道容量时，排在最后的 CycleComplete 必然被丢，界面就会一直
         // 停在上一轮的取值上 —— 而那很可能正是「无货」。实测 260 个目标时连续
         // 18 轮一条都没送达。
-        let normal_delay = self.next_delay();
+        let normal_delay = if self.client.backoff_enabled().await {
+            self.next_delay()
+        } else {
+            self.config.interval
+        };
         let delay = normal_delay.max(schedule_hint.delay);
         let next_check_in_secs = delay
             .as_secs()
@@ -966,6 +1007,7 @@ impl<F: Fetcher> Engine<F> {
             reused_response_count: stats.reused_response_count,
             next_check_in_secs,
             cooling: schedule_hint.cooling,
+            route: stats.route,
             healthy: problems == 0 && ok > 0,
             snapshot: self.snapshot(),
         })
@@ -973,16 +1015,15 @@ impl<F: Fetcher> Engine<F> {
         delay
     }
 
-    /// 下一轮的等待时长，含抖动与全局退避。
+    /// 下一轮的等待时长，只由用户设置的间隔与抖动决定。
     fn next_delay(&self) -> Duration {
-        let mut base = self.config.interval;
-
-        // 整轮全败时逐步拉长间隔，最多放大到 8 倍。被拦截还按原频率猛冲，
-        // 只会让风控更严。
-        if self.cycle_failures > 0 {
-            let factor = 1u32 << self.cycle_failures.min(3);
-            base = base.saturating_mul(factor);
-        }
+        let base = if self.cycle_failures > 0 {
+            self.config
+                .interval
+                .saturating_mul(1u32 << self.cycle_failures.min(3))
+        } else {
+            self.config.interval
+        };
 
         if self.config.jitter <= 0.0 {
             return base;

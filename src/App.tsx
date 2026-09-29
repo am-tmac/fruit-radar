@@ -32,6 +32,8 @@ import {
   type LogFilter,
 } from "@/components/ActivityLog";
 import { describeUpdateProgress, updatePercent } from "@/lib/updateStatus";
+import { CollapsiblePanel } from "@/components/CollapsiblePanel";
+import { NetworkSettings } from "@/components/NetworkSettings";
 import { Combobox } from "@/components/Combobox";
 import { MultiCombobox } from "@/components/MultiCombobox";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -728,14 +730,14 @@ export default function App() {
                                 variant="outline"
                                 size="icon-lg"
                                 className="size-9 rounded-[7px] border-hair-strong bg-transparent"
-                                aria-label="从 Apple 官网更新当前品类的型号列表"
+                                aria-label="从 Apple 官网更新门店列表和当前品类的型号"
                                 disabled={ui.refreshing}
                                 onClick={() => void refreshProducts()}
                               >
                                 <RefreshCw className={ui.refreshing ? "animate-spin" : undefined} />
                               </Button>
                             </TooltipTrigger>
-                            <TooltipContent>从 Apple 官网更新当前品类的型号列表</TooltipContent>
+                            <TooltipContent>从 Apple 官网更新门店列表和当前品类的型号</TooltipContent>
                           </Tooltip>
                           <Button className="h-9 min-w-28 rounded-[7px] px-4" onClick={() => void onAdd()} disabled={!canAdd}>
                             <Plus aria-hidden="true" />
@@ -1011,13 +1013,7 @@ export default function App() {
                 {/* 设置项会随功能增加而变长，这一块必须自己滚动。 */}
                 <ScrollArea className="mt-[26px] min-h-0 flex-1 pr-1">
                   <div className="grid items-start gap-[18px] pb-6 min-[1100px]:grid-cols-2">
-                    <section className="panel" aria-labelledby="preferences-title">
-                      <div className="eyebrow">设置</div>
-                      <h2 id="preferences-title" className="panel-title mt-1.5">
-                        监控设置
-                      </h2>
-                      <p className="mt-1 text-xs leading-5 text-muted-foreground">查询频率与提醒方式</p>
-
+                    <CollapsiblePanel id="preferences" icon={<Clock3 className="size-4" />} title="监控设置" subtitle="查询频率与提醒方式" summary={`每 ${ui.settings.intervalSeconds} 秒 · ${ui.settings.backoffEnabled ? "保护退避" : "严格间隔"}`}>
                       <div className="field-group mt-[18px]">
                         <Label htmlFor="interval" className="control-label text-[10.5px] font-semibold">
                           <Clock3 className="size-3" aria-hidden="true" /> 查询间隔
@@ -1061,7 +1057,14 @@ export default function App() {
                           监控列表可为某个型号指定其他人的 Bark 地址。
                         </p>
                       </div>
-                    </section>
+                      <div className="setting-row mt-4">
+                        <Label htmlFor="backoff-enabled">失败时保护退避（推荐）</Label>
+                        <Switch id="backoff-enabled" aria-label="失败时保护退避" checked={ui.settings.backoffEnabled} onCheckedChange={(value) => void saveSettings({ backoffEnabled: value })} />
+                      </div>
+                      <p className="mt-2 text-xs leading-5 text-muted-foreground">关闭后每轮完成后严格按设置间隔重试；持续被拦仍请求可能延长限制。Clash 节点本身的冷却与两秒最小请求间隔仍保留。</p>
+                    </CollapsiblePanel>
+
+                    <NetworkSettings network={ui.settings.network} running={ui.running} route={ui.route} />
 
                     <section className="panel" aria-labelledby="hit-actions-title">
                       <div className="eyebrow">到货动作</div>

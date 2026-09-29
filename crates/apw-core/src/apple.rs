@@ -95,8 +95,8 @@ impl ApiError {
     /// 是否适合在同一次调用里快速重试。
     ///
     /// 541/403 表示当前请求特征或会话已被拒绝。原样重放只会在几秒内连续制造
-    /// 更多拦截，因此交给监控层退避并在下一轮重建会话。网络瞬断、429 和服务端
-    /// 临时错误才适合在这里重试。
+    /// 更多拦截，因此由监控层在下一轮按用户设置的间隔重试。网络瞬断、429 和
+    /// 服务端临时错误才适合在同一次调用内快速重试。
     pub fn is_retryable(&self) -> bool {
         matches!(self, Self::RateLimited(_) | Self::Transport(_))
     }
@@ -485,6 +485,28 @@ pub trait Fetcher: Clone + Send + Sync + 'static {
         async {}
     }
 
+    /// 在并发查询开始前提供本轮的门店批次，供支持地点查询的实现合并型号。
+    /// 每个批次已满足单次型号数量上限；这里只规划，不发出网络请求。
+    fn plan_cycle(&self, _groups: &[Vec<Target>]) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
+
+    /// 读取上次送货结果，不发请求。缓存到期后刷新失败时仍可保留已有信息。
+    fn cached_delivery(
+        &self,
+        _target: &Target,
+        _location: Option<&DeliveryRegion>,
+    ) -> impl std::future::Future<Output = Option<DeliveryInfo>> + Send {
+        async { None }
+    }
+
+    fn set_backoff_enabled(&self, _enabled: bool) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
+    fn backoff_enabled(&self) -> impl std::future::Future<Output = bool> + Send {
+        async { true }
+    }
+
     /// 当前轮次实际发出的请求数与响应复用次数。
     fn cycle_stats(&self) -> impl std::future::Future<Output = CycleStats> + Send {
         async { CycleStats::default() }
@@ -516,10 +538,35 @@ pub trait Fetcher: Clone + Send + Sync + 'static {
 }
 
 /// 一轮内查询器真正产生的网络负载。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CycleStats {
     pub request_count: u32,
     pub reused_response_count: u32,
+    /// 本轮使用的出口线路说明，例如「Clash 节点 香港01（本轮切换 1 次）」。
+    /// 跟随系统代理时为 `None`。
+    pub route: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DeliveryInfo {
+    pub sale_reason: Option<String>,
+    pub sale_message: Option<String>,
+}
+
+impl DeliveryInfo {
+    /// 只补充配送字段，不保留过期的门店取货结论或文案。
+    pub fn merge_into(self, details: &mut Option<PickupDetails>) {
+        let details = details.get_or_insert_with(|| PickupDetails {
+            pickup_display: String::new(),
+            pickup_quote: None,
+            sale_reason: None,
+            sale_message: None,
+        });
+        if self.sale_reason.is_some() {
+            details.sale_reason = self.sale_reason;
+        }
+        details.sale_message = self.sale_message;
+    }
 }
 
 /// 查询器对下一轮开始时间的最低要求。
@@ -655,9 +702,9 @@ pub fn parse_pickup_message(raw: &[u8], want_store: &str) -> Result<StoreAvailab
         raw: format!("无法解析成 JSON：{e}"),
     })?;
 
-    // Apple 澳洲站会为仍存在于官方零售店目录、但当前未接入在线取货搜索的门店
-    // 返回 HTTP 200 + 这条业务文案。它表示“没有这家店的取货数据”，不是网络
-    // 故障，也不是无货；继续按普通 AppleError 展示成“查询失败”会误导用户。
+    // Apple 会用中英文业务文案表示当前搜索没有关联门店：澳洲站可能针对单店
+    // 返回，中国大陆站也可能针对地点搜索返回。它不是网络故障或无货；具体应该
+    // 回退单店还是显示暂停取货，由知道本次查询范围的 Chromium 层决定。
     if resp
         .body
         .error_message
@@ -769,10 +816,9 @@ pub fn parse_pickup_message(raw: &[u8], want_store: &str) -> Result<StoreAvailab
 }
 
 fn is_no_store_search_error(message: &str) -> bool {
-    message
-        .trim()
-        .to_ascii_lowercase()
-        .contains("no store associated with this search")
+    let normalized = message.trim().to_ascii_lowercase();
+    normalized.contains("no store associated with this search")
+        || normalized.contains("没有与此搜索相关的零售店")
 }
 
 /// 在读取门店数据之前先校验响应信封。

@@ -244,6 +244,43 @@ async fn live_china_refresh_discovers_new_iphones() {
     assert!(count >= 40);
 }
 
+#[tokio::test]
+async fn successful_and_partial_refreshes_survive_restart_without_network() {
+    for index in [
+        "<a href='/shop/buy-iphone/iphone-99-pro'>New</a>",
+        "<a href='/shop/buy-iphone/iphone-99-pro'>New</a><a href='/shop/buy-iphone/iphone-broken'>Broken</a>",
+    ] {
+        let server = Server::new(index);
+        let dir = std::env::temp_dir().join(format!(
+            "fruit-radar-catalog-e2e-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let catalog = Catalog::with_cache_dir(dir.clone());
+        let result = catalog
+            .refresh_products(
+                server.region(),
+                Some(Category::Iphone),
+                &reqwest::Client::new(),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Ok(1) | Err(CatalogError::RefreshFailed { fetched: 1, .. })
+        ));
+        let expected = catalog.products("zh_CN").unwrap();
+        drop(server);
+        let reloaded = Catalog::with_cache_dir(dir.clone());
+        assert_eq!(reloaded.products("zh_CN").unwrap(), expected);
+        assert!(reloaded.product_by_part("zh_CN", "FUTURE/A").is_some());
+        assert!(reloaded.last_refreshed("zh_CN").is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
 #[test]
 fn watch_configuration_links_are_normalized_to_family_pages() {
     let region = region_by_locale("zh_CN").unwrap();

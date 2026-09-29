@@ -171,6 +171,86 @@ impl ConfigError {
     }
 }
 
+/// Apple 查询使用的出口线路。
+///
+/// 默认跟随系统代理，与引入线路设置之前的行为完全一致：已有用户升级后不会
+/// 悄悄换一条出口。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkMode {
+    /// 不给查询浏览器指定代理，由系统代理设置决定出口。
+    #[default]
+    System,
+    /// 通过 Clash / mihomo 的专用端口，固定使用 `pinned_node`，不自动切换。
+    ///
+    /// 选 DIRECT 时经 Clash 直连出去。即使 Clash 开着 TUN 也能真正用上本机
+    /// 网络，这是只给浏览器加 `--no-proxy-server` 做不到的。
+    Pinned,
+    /// 通过 Clash / mihomo 的专用端口查询，被拦时经控制接口切换节点。
+    Clash,
+}
+
+/// Clash / mihomo 线路设置。
+///
+/// 应用只切换 `group` 这一个策略组的节点，并且只让查询浏览器走 `proxy_port`。
+/// 这要求用户为水果雷达单独配置策略组和监听端口，切换节点才不会改变电脑上
+/// 其他软件的代理出口。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ClashSettings {
+    /// 外部控制接口地址，例如 `http://127.0.0.1:9097`。
+    pub controller: String,
+    /// 外部控制接口密钥，可为空。
+    pub secret: String,
+    /// 专用 select 策略组名。
+    pub group: String,
+    /// 只转发到 `group` 的本机代理端口。
+    pub proxy_port: u16,
+    /// 节点名关键词，用 `|` 分隔；为空表示使用组内全部节点。
+    pub node_filter: String,
+    /// 「指定节点」模式固定使用的节点。
+    pub pinned_node: String,
+}
+
+impl Default for ClashSettings {
+    fn default() -> Self {
+        Self {
+            controller: "http://127.0.0.1:9097".into(),
+            secret: String::new(),
+            group: "水果雷达".into(),
+            proxy_port: 7899,
+            node_filter: String::new(),
+            pinned_node: "DIRECT".into(),
+        }
+    }
+}
+
+/// 查询网络设置。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NetworkSettings {
+    pub mode: NetworkMode,
+    pub clash: ClashSettings,
+}
+
+impl NetworkSettings {
+    fn normalize(&mut self) {
+        let clash = &mut self.clash;
+        clash.controller = clash.controller.trim().trim_end_matches('/').to_string();
+        // Clash 界面显示的监听地址不带协议（如 127.0.0.1:9097），用户会直接照抄。
+        if !clash.controller.is_empty() && !clash.controller.contains("://") {
+            clash.controller = format!("http://{}", clash.controller);
+        }
+        clash.secret = clash.secret.trim().to_string();
+        clash.group = clash.group.trim().to_string();
+        clash.node_filter = clash.node_filter.trim().to_string();
+        clash.pinned_node = clash.pinned_node.trim().to_string();
+        if clash.pinned_node.is_empty() {
+            clash.pinned_node = "DIRECT".into();
+        }
+    }
+}
+
 /// 持久化的用户设置。
 ///
 /// 字段名跨 IPC 边界要和前端对齐，所以统一小驼峰，与 [`Target`]、
@@ -199,6 +279,10 @@ pub struct Settings {
     /// 有货时自动打开的页面；旧字段 `openBagOnHit` 通过别名兼容。
     #[serde(alias = "openBagOnHit")]
     pub open_on_hit: OpenOnHit,
+    /// Apple 查询的出口线路；仅显式配置后启用 Clash。
+    pub network: NetworkSettings,
+    /// 默认保护退避；false 时严格按用户设置的间隔重试。
+    pub backoff_enabled: bool,
     /// 有货时是否在专属的「买家」浏览器里自动把该商品加入购物袋。
     ///
     /// 与 [`open_on_hit`](Self::open_on_hit) 的区别是「谁来点那一下」：
@@ -247,6 +331,8 @@ impl Default for Settings {
             product_bark_urls: BTreeMap::new(),
             sound_enabled: true,
             open_on_hit: OpenOnHit::default(),
+            network: NetworkSettings::default(),
+            backoff_enabled: true,
             auto_add_to_bag: false,
             bag_applecare: false,
             pickup_last_name: String::new(),
@@ -315,6 +401,7 @@ impl Settings {
             .iter()
             .map(|target| target.part_number.clone())
             .collect();
+        self.network.normalize();
         self.product_bark_urls.retain(|part_number, bark_url| {
             *bark_url = bark_url.trim().to_string();
             active_parts.contains(part_number) && !bark_url.is_empty()
@@ -765,6 +852,8 @@ impl LegacySettings {
             },
             // 老版本没有自动加购这个概念，迁移后一律关闭：升级不该替用户
             // 打开一个会替他操作网页的开关。
+            network: fallback.network,
+            backoff_enabled: fallback.backoff_enabled,
             auto_add_to_bag: fallback.auto_add_to_bag,
             bag_applecare: fallback.bag_applecare,
             pickup_last_name: String::new(),

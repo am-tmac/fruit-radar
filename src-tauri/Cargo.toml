@@ -23,6 +23,7 @@ apw-core = { path = "../crates/apw-core" }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-updater = "2"
 tauri-plugin-opener = "2"
+dirs.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

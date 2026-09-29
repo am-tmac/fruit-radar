@@ -221,6 +221,7 @@ fn 轮询事件携带前端可用的轮次与耗时() {
         elapsed_ms: 2_150,
         request_count: 1,
         reused_response_count: 2,
+        route: None,
         next_check_in_secs: 60,
         cooling: true,
         healthy: true,
