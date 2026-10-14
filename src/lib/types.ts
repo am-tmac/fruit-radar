@@ -11,6 +11,7 @@
  */
 
 export type UnknownReason =
+  | { reason: "browser_unavailable"; detail: string }
   | { reason: "not_yet_checked" }
   | { reason: "pickup_pending" }
   | { reason: "blocked"; detail: string }
@@ -34,6 +35,11 @@ export interface Target {
   storeTitle: string;
   partNumber: string;
   productName: string;
+  /** Apple Watch 送货查询搭配的表带零件号（后端目录补全，可能缺省）。 */
+  companionPart?: string;
+  companionName?: string;
+  /** Apple Watch 整表套件号。 */
+  kitPart?: string;
 }
 
 export interface PickupDetails {
@@ -137,6 +143,30 @@ export interface CatalogRefresh {
   errors: string[];
 }
 
+/** 自动结账使用的付款方式，与 Rust 侧 `CheckoutPayment` 一一对应。 */
+export type CheckoutPayment = "alipay" | "wechat" | "installment";
+
+/** Apple 结账页提供的分期期数。 */
+export const INSTALLMENT_PERIODS = [1, 3, 6, 12, 24] as const;
+
+/**
+ * 到货后自动结账的设置。目前只支持中国大陆的直营店取货。
+ * 取货联系人与证件后四位不在这里：与「取货信息」共用 Settings 顶层的 pickup* 字段。
+ */
+export interface CheckoutSettings {
+  enabled: boolean;
+  payment: CheckoutPayment;
+  /** 分期方案名称，按结账页上的名称匹配。 */
+  installmentBank: string;
+  installmentPeriods: number;
+  /** 核对通过后是否自动点「立即下单」。 */
+  placeOrder: boolean;
+  /** 结账页默认选中的最近有货门店可取货时直接用它。 */
+  acceptNearestStore: boolean;
+  /** 要下单的商品标识（见 checkoutProductKey）。留空且只监控一件商品时自动认定为那一件。 */
+  product: string;
+}
+
 export interface Settings {
   network: NetworkSettings;
   backoffEnabled: boolean;
@@ -158,6 +188,9 @@ export interface Settings {
   pickupEmail: string;
   pickupPhone: string;
   pickupIdLast4: string;
+  /** 监控到有货后是否暂停监控；关闭时持续有货会每轮重复提醒。 */
+  stopOnHit: boolean;
+  checkout: CheckoutSettings;
 }
 
 /** 监控目标的唯一键，与 Rust 侧 Target::key 的构成保持一致。 */
@@ -303,6 +336,8 @@ function describeUnknown(a: { kind: "unknown" } & UnknownReason): {
       return { label: "未知", tone: "unknown", detail: `Apple 返回错误：${compactDiagnostic(a.message)}` };
     case "transport":
       return { label: "未知", tone: "unknown", detail: describeTransportFailure(a.detail) };
+    case "browser_unavailable":
+      return { label: "浏览器未连接", tone: "unknown", detail: `${compactDiagnostic(a.detail)}。当前库存尚未更新；运行中会按设置的间隔再次尝试连接。` };
     default:
       return assertNever(a);
   }

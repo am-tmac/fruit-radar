@@ -3,6 +3,7 @@ import packageInfo from "../package.json";
 import {
   AlertTriangle,
   BellRing,
+  CirclePause,
   Clock3,
   Download,
   LoaderCircle,
@@ -33,6 +34,7 @@ import {
 } from "@/components/ActivityLog";
 import { describeUpdateProgress, updatePercent } from "@/lib/updateStatus";
 import { CollapsiblePanel } from "@/components/CollapsiblePanel";
+import { CheckoutSettings } from "@/components/CheckoutSettings";
 import { NetworkSettings } from "@/components/NetworkSettings";
 import { Combobox } from "@/components/Combobox";
 import { MultiCombobox } from "@/components/MultiCombobox";
@@ -110,7 +112,7 @@ import {
   targetKey,
 } from "@/lib/types";
 
-import { describeDelivery, describeMonitorStatus, describePickupDate } from "@/lib/monitorLog";
+import { describeBrowserFailure, describeBrowserRecovery, describeDelivery, describeMonitorStatus, describePickupDate } from "@/lib/monitorLog";
 import { compareNewestProducts, sortMonitorsNewestFirst } from "@/lib/productOrder";
 
 /* 状态点：整张界面里唯一带颜色的东西，7px、紧挨着墨色文字。 */
@@ -325,6 +327,10 @@ export default function App() {
       : ui.cooling
         ? `保护冷却中 · 约 ${secondsUntilNextCheck} 秒后检查`
         : `约 ${secondsUntilNextCheck} 秒后检查`;
+  const browserFailure = describeBrowserFailure(ui.rows);
+  const browserRunningLabel = secondsUntilNextCheck !== null && secondsUntilNextCheck > 0
+    ? `浏览器未连接 · 约 ${secondsUntilNextCheck} 秒后重试`
+    : "浏览器未连接 · 正在重新连接";
 
   const storeOptions = useMemo(
     () => ui.stores.map((store) => ({ value: store.number, label: store.title })),
@@ -425,7 +431,8 @@ export default function App() {
   async function onRetryNow() {
     setIsRetrying(true);
     try {
-      await retryWatchingNow();
+      if (ui.running) await retryWatchingNow();
+      else await startWatching();
     } finally {
       setIsRetrying(false);
     }
@@ -509,10 +516,10 @@ export default function App() {
               <div className="mb-2 text-[11.5px] text-muted-foreground/70 tabular-nums">v{packageInfo.version}</div>
               <div className="flex items-center gap-2 text-[13px] font-medium">
                 <span
-                  className={`size-[7px] shrink-0 rounded-full ${ui.running ? "bg-in-stock" : "bg-muted-foreground/55"}`}
+                  className={`size-[7px] shrink-0 rounded-full ${ui.running ? browserFailure !== null ? "bg-destructive" : "bg-in-stock" : "bg-muted-foreground/55"}`}
                   aria-hidden="true"
                 />
-                {ui.running ? "运行中" : "已暂停"}
+                {ui.running ? browserFailure !== null ? "浏览器未连接" : "运行中" : "已暂停"}
               </div>
               <div className="mt-1.5 mb-3.5 text-[11.5px] text-muted-foreground/70 tabular-nums">{railMeta}</div>
               {ui.running ? (
@@ -547,7 +554,33 @@ export default function App() {
           </aside>
 
           <main className="flex min-h-0 min-w-0 flex-1 flex-col px-8 pt-[30px] pb-5">
-            {ui.trouble !== null && (
+            {browserFailure !== null && (
+              <Alert className="mb-4 shrink-0 rounded-[10px] border-hair-strong bg-card px-4 py-3">
+                <AlertTriangle className="text-destructive" aria-hidden="true" />
+                <AlertTitle className="text-destructive">查询浏览器未连接</AlertTitle>
+                <AlertDescription>
+                  <span>{browserFailure.split("。")[0]}。</span>
+                  <span>当前库存尚未更新，请按以下步骤处理：</span>
+                  <ol className="list-decimal space-y-1 pl-5">
+                    {describeBrowserRecovery(browserFailure).map((step) => <li key={step}>{step}</li>)}
+                  </ol>
+                  <span className="text-xs">{ui.running ? `${browserRunningLabel}。` : "当前监控已暂停。"}</span>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-4">
+                    <Button variant="outline" size="sm" onClick={() => void onRetryNow()} disabled={isRetrying} aria-busy={isRetrying}>
+                      <RefreshCw className={isRetrying ? "animate-spin motion-reduce:animate-none" : undefined} aria-hidden="true" />
+                      {isRetrying ? "正在连接…" : ui.running ? "处理后重试" : "开始监控"}
+                    </Button>
+                    <details className="min-w-0 text-xs">
+                      <summary className="cursor-pointer rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2">查看详情</summary>
+                      <p className="mt-2 break-words">{browserFailure}</p>
+                      <p className="mt-1 break-words">启动诊断（如已生成）位于查询浏览器专属目录 chromium-profile-v1 的 browser-startup.log 中。</p>
+                    </details>
+                  </div>
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {ui.trouble !== null && browserFailure === null && (
               <Alert className="mb-4 shrink-0 rounded-[10px] border-hair-strong bg-card px-4 py-3">
                 <AlertTriangle className="text-destructive" aria-hidden="true" />
                 <AlertTitle className="text-destructive">监控结果暂不可信</AlertTitle>
@@ -1129,6 +1162,24 @@ export default function App() {
                           />
                         </div>
 
+                        <div className="setting-row">
+                          <Label htmlFor="stop-on-hit" className="flex items-center gap-2 text-[13.5px] font-normal">
+                            <CirclePause className="size-4 text-muted-foreground/70" aria-hidden="true" />
+                            到货后暂停监控
+                          </Label>
+                          <Switch
+                            id="stop-on-hit"
+                            aria-label="到货后暂停监控"
+                            checked={ui.settings.stopOnHit}
+                            onCheckedChange={(value) => void saveSettings({ stopOnHit: value })}
+                          />
+                        </div>
+                        <p className="px-0 py-2 text-[11px] leading-4 text-muted-foreground">
+                          {ui.settings.stopOnHit
+                            ? "任意一条监控到有货后暂停监控；本轮的提醒、自动加购和自动结账照常完成，需要时再手动开始。"
+                            : "持续有货时，每一轮都会重新提醒；开启了自动结账且上一次没有成功时，也会再次尝试。"}
+                        </p>
+
                         {ui.settings.autoAddToBag && (
                           <div className="setting-row">
                             <Label htmlFor="bag-applecare" className="flex items-center gap-2 text-[13.5px] font-normal">
@@ -1146,7 +1197,14 @@ export default function App() {
                       </div>
                     </section>
 
-                    {ui.settings.autoAddToBag && (
+                    <CheckoutSettings
+                      checkout={ui.settings.checkout}
+                      targets={ui.settings.targets}
+                      pickupIdLast4={ui.settings.pickupIdLast4}
+                      autoAddToBag={ui.settings.autoAddToBag}
+                    />
+
+                    {(ui.settings.autoAddToBag || ui.settings.checkout.enabled) && (
                       <section className="panel min-[1100px]:col-span-2" aria-labelledby="auto-bag-title">
                         <div className="eyebrow">自动加购</div>
                         <h2 id="auto-bag-title" className="panel-title mt-1.5">
@@ -1157,7 +1215,8 @@ export default function App() {
                           <span className="text-foreground/90">请先打开它并登录 Apple 账号</span>
                           ，否则加进购物袋的商品在结账时仍是未登录状态。登录同一个 Apple ID 后，
                           桌面加进购物袋的东西在手机的 Apple Store App 里也能看到。
-                          开启后不再另外调用系统浏览器。程序只点到「添加到购物袋」为止，付款留给你。
+                          开启后不再另外调用系统浏览器。自动加购只点到「添加到购物袋」为止；开启「自动结账」时，
+                          会在同一个窗口里接着走结账页面，默认停在「查看订单」页。付款始终留给你。
                         </p>
                         <div className="mt-3 flex gap-2.5">
                           <Button variant="outline" className="h-9 flex-1 rounded-[7px] border-hair-strong" onClick={() => void openBuyerWindow()}>
@@ -1177,8 +1236,8 @@ export default function App() {
                       </h2>
                       <p className="mt-1 text-xs leading-5 text-muted-foreground">
                         Apple 不会从账号预填门店取货的联系人，每次都得手打。在这里填一次，走到结账页「继续填写取货详情」时点下面的按钮即可代填。
-                        <span className="text-foreground/80">程序只填这五栏，不提交订单、不碰支付。</span>
-                        这几项存在本机配置里，可随时清空。
+                        <span className="text-foreground/80">手动代填只填这五栏，不提交订单、不碰支付。</span>
+                        「自动结账」也使用这一份信息（证件后四位为必填）。这几项只存在本机配置里，不会写进活动日志，可随时清空。
                       </p>
                       <div key={pickupFormKey} className="mt-[18px] grid items-start gap-2.5 min-[900px]:grid-cols-3">
                         <Input

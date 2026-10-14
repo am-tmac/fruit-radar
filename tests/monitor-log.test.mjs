@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  describeBrowserFailure,
+  describeBrowserRecovery,
+  describeCycleRows,
   describeCycleRow,
   describeCycleSummary,
   describeDelivery,
@@ -10,6 +13,34 @@ import {
 const target = { storeTitle: "上海-南京东路", storeNumber: "R359", productName: "iPhone", partNumber: "MJTJ4CH/A", locale: "zh_CN" };
 const row = (availability, pickupDetails) => ({ target, availability, pickupDetails });
 const unavailable = {kind:"out_of_stock"};
+test("浏览器故障按原因给出可执行步骤，21 不直接认定为重复启动", () => {
+  const occupied = describeBrowserRecovery("浏览器专属资料目录被占用，或无法取得目录锁。请确认没有其他水果雷达实例正在运行（退出码 21）").join("\n");
+  assert.match(occupied, /菜单栏.*退出/);
+  assert.match(occupied, /只关主窗口.*留在后台/);
+  assert.match(occupied, /重新打开一次.*开始监控/);
+  assert.doesNotMatch(occupied, /你.*打开了两个|安全软件/);
+  const denied = describeBrowserRecovery("无法访问资料目录：Operation not permitted (os error 1)").join("\n");
+  assert.match(denied, /拦截记录/);
+  assert.match(denied, /联系管理员/);
+  assert.doesNotMatch(denied, /重启电脑/);
+  const missing = describeBrowserRecovery("未找到 Google Chrome 或 Microsoft Edge").join("\n");
+  assert.match(missing, /安装 Google Chrome 或 Microsoft Edge/);
+  assert.match(missing, /应用程序/);
+  assert.doesNotMatch(missing.concat(occupied, denied), /Windows|右下角/);
+});
+test("共享浏览器启动故障只汇总一次，连续轮次不刷屏，正常结果继续记录", () => {
+  const detail = "浏览器专属资料目录被占用，或无法取得目录锁（退出码 21）";
+  const failure = row({kind:"unknown",reason:"browser_unavailable",detail});
+  const rows = [failure, failure, failure, row(unavailable)];
+  const lines = describeCycleRows(1, rows);
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /影响 3 项监控/);
+  assert.match(lines[1], /无货/);
+  assert.equal(describeMonitorStatus(failure).label, "浏览器未连接");
+  assert.equal(describeBrowserFailure(rows), detail);
+  assert.equal(describeCycleRows(2, rows, detail).length, 1);
+  assert.equal(describeBrowserFailure([row(unavailable)]), null);
+});
 const details = {pickupDisplay:"ineligible", pickupQuote:"目前暂不提供 Apple Store 零售店取货服务",saleReason:"NOT_FOR_SALE",saleMessage:"暂未发售"};
 test("缺失 SKU 与空取货节点分别解释，不误报结构错误或无货", () => {
   const missing = row({kind:"unknown",reason:"product_not_returned",part_number:target.partNumber});

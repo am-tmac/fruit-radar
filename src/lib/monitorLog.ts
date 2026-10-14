@@ -12,6 +12,7 @@ export function describeMonitorStatus(row: Pick<TargetState, "availability" | "p
       product_not_returned: "未返回型号",
       blocked: "请求被拦截", rate_limited: "请求被限流",
       transport: "查询失败", schema_drift: "响应解析失败", apple_error: "Apple 返回错误",
+      browser_unavailable: "浏览器未连接",
     };
     return { ...base, label: labels[a.reason] ?? base.label };
   }
@@ -157,4 +158,61 @@ export function describeCycleSummary(rows: TargetState[]): string {
     counts.set(label, (counts.get(label) ?? 0) + 1);
   }
   return [...counts].map(([label, count]) => `${label} ${count} 项`).join("、") || "无监控项";
+}
+
+/** 任一监控项处于「浏览器未连接」时返回它的原因。查询浏览器是共享的，取第一条即可。 */
+export function describeBrowserFailure(rows: Pick<TargetState, "availability">[]): string | null {
+  for (const row of rows) {
+    if (row.availability.kind === "unknown" && row.availability.reason === "browser_unavailable") {
+      return row.availability.detail;
+    }
+  }
+  return null;
+}
+
+/** 只决定用户可执行的排查步骤（macOS），不推断占用者，也不触发清理。 */
+export function describeBrowserRecovery(detail: string): string[] {
+  if (/未找到.*(?:Chrome|Edge|Chromium|浏览器)/i.test(detail)) {
+    return [
+      "安装 Google Chrome 或 Microsoft Edge，放在“应用程序”目录；手动打开一次，确认浏览器能够正常启动。",
+      "回到水果雷达点击“处理后重试”；如果监控已暂停，点击“开始监控”。",
+    ];
+  }
+  if (/拒绝访问|权限不足|系统阻止|access is denied|permission denied|operation not permitted/i.test(detail)) {
+    return [
+      "查看安全软件的拦截记录，确认没有阻止水果雷达启动 Chrome/Edge 或访问专属资料目录；被拦截时允许对应程序。",
+      "如果电脑受公司或管理员策略限制，请联系管理员处理权限；解除限制后回到软件重试。",
+    ];
+  }
+  if (/目录.*(?:占用|锁)|目录锁|另一个.*实例|退出码\s*21|exit code:\s*21/i.test(detail)) {
+    return [
+      "从顶部菜单栏的水果雷达图标选择“退出”，完全退出应用；只关主窗口会留在后台。",
+      "应用会关闭自己启动的专属浏览器及其子进程，无需手动关闭 Chrome/Edge。重新打开一次水果雷达，然后点击“开始监控”。",
+      "如果仍然报同样的错误，重启电脑后仅打开一次水果雷达，再开始监控。",
+    ];
+  }
+  return [
+    "手动打开 Google Chrome 或 Microsoft Edge，确认浏览器能够正常启动；打不开时，先更新或重新安装浏览器。",
+    "从顶部菜单栏的水果雷达图标选择“退出”，再重新打开软件并开始监控。",
+  ];
+}
+
+/** 同一次启动故障只记一条汇总，正常门店和其他故障仍按项记录。 */
+export function describeCycleRows(cycle: number, rows: TargetState[], previousFailure: string | null = null): string[] {
+  const lines: string[] = [];
+  const failures = new Map<string, number>();
+  for (const row of rows) {
+    const a = row.availability;
+    if (a.kind === "unknown" && a.reason === "browser_unavailable") {
+      failures.set(a.detail, (failures.get(a.detail) ?? 0) + 1);
+    } else {
+      lines.push(describeCycleRow(cycle, row));
+    }
+  }
+  for (const [detail, count] of failures) {
+    if (detail !== previousFailure) {
+      lines.unshift(`第 ${cycle} 轮 · 查询浏览器未连接，影响 ${count} 项监控：${detail}。库存尚未更新；运行中会按设置间隔重新连接。`);
+    }
+  }
+  return lines;
 }

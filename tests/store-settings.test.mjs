@@ -30,6 +30,11 @@ const defaults = {
   backoffEnabled: true,
   autoAddToBag: false, bagApplecare: false,
   pickupLastName: "", pickupFirstName: "", pickupEmail: "", pickupPhone: "", pickupIdLast4: "",
+  stopOnHit: false,
+  checkout: {
+    enabled: false, payment: "alipay", installmentBank: "招商银行", installmentPeriods: 24,
+    placeOrder: false, acceptNearestStore: false, product: "",
+  },
 };
 let generation = 0;
 async function setup() {
@@ -237,4 +242,36 @@ test("catalog refresh reports independent failures and reloads stores and produc
     assert.ok(log.includes(result.stores === null ? "门店未更新" : "门店 49 家"), log);
     assert.ok(log.includes(result.errors[0]), log);
   }
+});
+
+test("backend settings pushes replace the UI copy so a later save cannot re-enable checkout", async () => {
+  const { store } = await setup();
+  invoke = async (command) => {
+    if (command === "get_settings") return { ...defaults, checkout: { ...defaults.checkout, enabled: true } };
+    if (command === "is_running") return false;
+    return [];
+  };
+  await store.connect();
+  assert.equal(store.watcherStore.getSnapshot().settings.checkout.enabled, true);
+  globalThis.__listeners["watcher://settings"]({ payload: { ...defaults, checkout: { ...defaults.checkout, enabled: false } } });
+  assert.equal(store.watcherStore.getSnapshot().settings.checkout.enabled, false);
+});
+
+test("checkout test run waits for pending settings and never auto-starts monitoring", async () => {
+  const ctx = await setup();
+  const originalInvoke = invoke;
+  invoke = async (command, args) => {
+    if (command === "test_checkout") { ctx.calls.push(command); return "试跑完成"; }
+    return originalInvoke(command, args);
+  };
+  ctx.block();
+  const save = ctx.store.saveSettings({ pickupIdLast4: "0000" });
+  await tick();
+  const run = ctx.store.testCheckout();
+  await tick();
+  assert.deepEqual(ctx.calls, ["save_settings"]);
+  ctx.release();
+  await Promise.all([save, run]);
+  assert.deepEqual(ctx.calls, ["save_settings", "test_checkout"]);
+  assert.equal(ctx.calls.includes("start_watching"), false);
 });

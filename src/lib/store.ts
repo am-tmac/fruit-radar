@@ -32,12 +32,13 @@ import type {
   WatcherEvent,
 } from "./types";
 import { assertNever, targetKey } from "./types";
-import { describeCycleRow, describeCycleSummary } from "./monitorLog";
+import { describeBrowserFailure, describeCycleRows, describeCycleSummary } from "./monitorLog";
 
 import { describeUpdateError, type UpdateProgress } from "./updateStatus";
 
 const EVENT_CHANNEL = "watcher://event";
 const NOTICE_CHANNEL = "watcher://notice";
+const SETTINGS_CHANNEL = "watcher://settings";
 const MAX_LOG_LINES = 300;
 
 export interface UiState {
@@ -103,6 +104,16 @@ const DEFAULT_SETTINGS: Settings = {
   pickupEmail: "",
   pickupPhone: "",
   pickupIdLast4: "",
+  stopOnHit: false,
+  checkout: {
+    enabled: false,
+    payment: "alipay",
+    installmentBank: "招商银行",
+    installmentPeriods: 24,
+    placeOrder: false,
+    acceptNearestStore: false,
+    product: "",
+  },
 };
 
 let state: UiState = {
@@ -198,6 +209,7 @@ function applyEvent(event: WatcherEvent): void {
 
     case "cycleComplete": {
       const recovered = event.healthy && state.trouble !== null;
+      const previousBrowserFailure = describeBrowserFailure(state.rows);
       update({
         rows: event.snapshot,
         nextCheckAtMs: Date.now() + event.nextCheckInSecs * 1_000,
@@ -207,7 +219,10 @@ function applyEvent(event: WatcherEvent): void {
         // 不可靠的：某些故障路径下状态压根没被更新。
         trouble: event.healthy ? null : state.trouble,
       });
-      const lines = event.snapshot.map((row) => describeCycleRow(event.cycle, row));
+      const lines = describeCycleRows(event.cycle, event.snapshot, previousBrowserFailure);
+      if (previousBrowserFailure !== null && event.requestCount > 0 && describeBrowserFailure(event.snapshot) === null) {
+        lines.unshift("浏览器启动故障已解除。");
+      }
       if (recovered) lines.unshift("查询已恢复正常。");
       lines.push(
         `第 ${event.cycle} 轮完成（${formatElapsed(event.elapsedMs)}，实际请求 ${event.requestCount} 次` +
@@ -260,6 +275,9 @@ export function connect(): Promise<void> {
         else applyEvent(e.payload);
       }),
       listen<string>(NOTICE_CHANNEL, (e) => pushLog(e.payload)),
+      // 后端自己改了设置（结账完成后关闭自动结账）时同步过来，否则界面上的开关
+      // 还显示开启，下一次保存会把它重新打开。
+      listen<Settings>(SETTINGS_CHANNEL, (e) => update({ settings: e.payload })),
     ]);
 
     const [regions, categories, settings, rows, running] = await Promise.all([
@@ -532,6 +550,16 @@ export async function selectClashNode(node: string): Promise<boolean> {
   } catch (err) {
     pushLog(`手动切换节点失败：${String(err)}`);
     return false;
+  }
+}
+
+/** 试跑自动结账到「查看订单」页，不提交订单。在买家窗口里进行。 */
+export async function testCheckout(): Promise<void> {
+  try {
+    await settingsWrite;
+    pushLog(await invoke<string>("test_checkout"));
+  } catch (err) {
+    pushLog(`试跑自动结账没有完成：${String(err)}`);
   }
 }
 
