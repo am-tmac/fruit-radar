@@ -15,7 +15,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::os::unix::fs::PermissionsExt;
 
 use apw_core::config::{
-    ConfigError, DEFAULT_INTERVAL_SECONDS, MAX_SETTINGS_BYTES, OpenOnHit, Settings, SettingsStore,
+    CheckoutPayment, CheckoutSettings, ConfigError, DEFAULT_INTERVAL_SECONDS, MAX_SETTINGS_BYTES,
+    OpenOnHit, Settings, SettingsStore, normalized_id_suffix,
 };
 use apw_core::model::Target;
 
@@ -107,6 +108,16 @@ fn 样例设置() -> Settings {
         pickup_email: "pickup-fixture@example.invalid".into(),
         pickup_phone: "00000000000".into(),
         pickup_id_last4: "0000".into(),
+        stop_on_hit: true,
+        checkout: CheckoutSettings {
+            enabled: true,
+            payment: CheckoutPayment::Installment,
+            installment_bank: "招商银行".into(),
+            installment_periods: 24,
+            place_order: false,
+            accept_nearest_store: true,
+            product: "MG724CH/A||".into(),
+        },
     }
 }
 
@@ -617,6 +628,8 @@ fn 设置的线上格式是小驼峰() {
         "pickupEmail",
         "pickupPhone",
         "pickupIdLast4",
+        "stopOnHit",
+        "checkout",
     ] {
         assert!(obj.contains_key(key), "缺少字段 {key}：{value}");
     }
@@ -625,7 +638,26 @@ fn 设置的线上格式是小驼峰() {
     assert!(!obj.contains_key("openBagOnHit"));
     assert_eq!(obj.get("backoffEnabled"), Some(&serde_json::json!(true)));
     assert_eq!(obj["network"]["mode"], "system");
-    assert_eq!(obj.len(), 17);
+    assert_eq!(obj.get("stopOnHit"), Some(&serde_json::json!(true)));
+    let checkout = obj["checkout"].as_object().expect("checkout 应当是对象");
+    for key in [
+        "enabled",
+        "payment",
+        "installmentBank",
+        "installmentPeriods",
+        "placeOrder",
+        "acceptNearestStore",
+        "product",
+    ] {
+        assert!(checkout.contains_key(key), "checkout 缺少字段 {key}");
+    }
+    // 联系人与证件后四位只有顶层 pickup* 一份来源，checkout 里不能再出现第二份。
+    for key in ["nationalIdSuffix", "fillContact", "contactLastName", "contactPhone"] {
+        assert!(!checkout.contains_key(key), "checkout 不该有重复联系人字段 {key}");
+    }
+    assert_eq!(checkout.len(), 7);
+    assert_eq!(checkout["payment"], "installment");
+    assert_eq!(obj.len(), 19);
 }
 
 #[test]
@@ -706,4 +738,119 @@ fn old_settings_keep_system_network_and_backoff_and_opt_in_roundtrips() {
     strict.network.mode = apw_core::config::NetworkMode::Clash;
     store.save(&strict).unwrap();
     assert_eq!(store.load().unwrap(), strict);
+}
+
+#[test]
+fn 自动结账默认关闭_不自动下单_到货不暂停() {
+    let settings = Settings::default();
+    let checkout = &settings.checkout;
+    assert!(!checkout.enabled);
+    assert!(!checkout.place_order);
+    assert!(!checkout.accept_nearest_store);
+    assert!(!settings.stop_on_hit);
+    assert!(!settings.auto_add_to_bag);
+    assert!(!settings.has_pickup_id_suffix());
+
+    let mut huabei = Settings::default();
+    huabei.checkout.installment_bank = "花呗分期".into();
+    huabei.checkout.installment_periods = 24;
+    huabei.normalize();
+    assert_eq!(huabei.checkout.installment_periods, 12);
+}
+
+#[test]
+fn 旧配置缺少自动结账与暂停字段时保持关闭() {
+    let settings: Settings = serde_json::from_str(r#"{"locale":"zh_CN"}"#).expect("解析失败");
+    assert_eq!(settings.checkout, CheckoutSettings::default());
+    assert!(!settings.stop_on_hit);
+}
+
+#[test]
+fn 证件后四位只保留字母数字并转大写() {
+    assert_eq!(normalized_id_suffix(" 12-3x9 "), "123X");
+    let mut settings = Settings::default();
+    settings.pickup_id_last4 = "12x".into();
+    assert!(!settings.has_pickup_id_suffix());
+    settings.pickup_id_last4 = "12-3x".into();
+    assert!(settings.has_pickup_id_suffix());
+    settings.checkout.installment_periods = 5;
+    settings.checkout.installment_bank = " 招商银行 ".into();
+    settings.normalize();
+    assert_eq!(settings.checkout.installment_periods, 24);
+    assert_eq!(settings.checkout.installment_bank, "招商银行");
+}
+
+#[test]
+fn 只监控一件商品时自动认定它为下单商品() {
+    let mut settings = Settings {
+        targets: vec![目标("R683", "MG724CH/A"), 目标("R448", "MG724CH/A")],
+        ..Default::default()
+    };
+    settings.checkout.enabled = true;
+    settings.normalize();
+    assert_eq!(settings.checkout_product().as_deref(), Some("MG724CH/A||"));
+    assert!(settings.checkout.enabled);
+    assert!(settings.is_checkout_target(&settings.targets[1]));
+}
+
+#[test]
+fn 监控多件商品时只有选中的那件会触发结账() {
+    let mut settings = Settings {
+        targets: vec![目标("R683", "MG724CH/A"), 目标("R683", "MG0A4CH/A")],
+        ..Default::default()
+    };
+    settings.checkout.enabled = true;
+    settings.checkout.product = "MG0A4CH/A||".into();
+    settings.normalize();
+    assert!(settings.checkout.enabled);
+    assert!(!settings.is_checkout_target(&settings.targets[0]));
+    assert!(settings.is_checkout_target(&settings.targets[1]));
+}
+
+#[test]
+fn 没有明确的下单商品时自动结账会被关掉() {
+    let mut settings = Settings {
+        targets: vec![目标("R683", "MG724CH/A"), 目标("R683", "MG0A4CH/A")],
+        ..Default::default()
+    };
+    settings.checkout.enabled = true;
+    settings.normalize();
+    assert_eq!(settings.checkout_product(), None);
+    assert!(!settings.checkout.enabled);
+    assert!(!settings.is_checkout_target(&settings.targets[0]));
+
+    // 选中的那件被删掉后，剩下的唯一一件不能悄悄顶替成下单商品。
+    let mut settings = Settings {
+        targets: vec![目标("R683", "MG724CH/A"), 目标("R683", "MG0A4CH/A")],
+        ..Default::default()
+    };
+    settings.checkout.enabled = true;
+    settings.checkout.product = "MG724CH/A||".into();
+    settings.targets.remove(0);
+    settings.normalize();
+    assert!(settings.checkout.product.is_empty());
+    assert!(!settings.checkout.enabled);
+}
+
+#[test]
+fn 其他地区的监控项不会触发自动结账() {
+    let mut settings = Settings::default();
+    let mut abroad = 目标("R409", "MG724ZP/A");
+    abroad.locale = "zh_HK".into();
+    settings.targets = vec![abroad];
+    settings.checkout.enabled = true;
+    settings.normalize();
+    assert_eq!(settings.checkout_product(), None);
+    assert!(!settings.checkout.enabled);
+}
+
+#[test]
+fn 自动结账设置可以往返保存() {
+    let dir = 临时目录::new("checkout-roundtrip");
+    let store = SettingsStore::at(dir.设置路径());
+    let mut want = 样例设置();
+    want.checkout.payment = CheckoutPayment::Wechat;
+    want.checkout.place_order = true;
+    store.save(&want).expect("保存失败");
+    assert_eq!(store.load().expect("读取失败"), want);
 }

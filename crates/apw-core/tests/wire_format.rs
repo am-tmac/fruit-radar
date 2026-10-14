@@ -48,6 +48,12 @@ fn 可用状态的线上格式() {
 fn 未知状态会扁平成两层判别字段() {
     let cases: Vec<(UnknownReason, serde_json::Value)> = vec![
         (
+            UnknownReason::BrowserUnavailable {
+                detail: "资料目录无法取得锁".into(),
+            },
+            json!({"kind": "unknown", "reason": "browser_unavailable", "detail": "资料目录无法取得锁"}),
+        ),
+        (
             UnknownReason::NotYetChecked,
             json!({"kind": "unknown", "reason": "not_yet_checked"}),
         ),

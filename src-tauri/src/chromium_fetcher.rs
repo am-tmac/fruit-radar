@@ -28,6 +28,7 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
+use crate::browser_support::startup_exit_detail;
 use crate::clash::ClashController;
 use crate::route_pool::RoutePool;
 
@@ -124,6 +125,54 @@ fn reserve_loopback_port() -> Result<u16, ApiError> {
         .local_addr()
         .map(|address| address.port())
         .map_err(|e| ApiError::Transport(format!("无法读取 Chromium 本机调试端口：{e}")))
+}
+
+/// 持续排空 stderr，最多保留启动阶段的 16 KiB，避免管道堵塞或日志无限增长。
+fn capture_startup_output(child: &mut Child, output: Arc<std::sync::Mutex<Vec<u8>>>) {
+    if let Some(mut stderr) = child.stderr.take() {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buffer = [0; 1024];
+            while let Ok(count) = stderr.read(&mut buffer) {
+                if count == 0 {
+                    break;
+                }
+                if let Ok(mut bytes) = output.lock() {
+                    let retained = count.min((16 * 1024usize).saturating_sub(bytes.len()));
+                    bytes.extend_from_slice(&buffer[..retained]);
+                }
+            }
+        });
+    }
+}
+
+fn startup_output(output: &std::sync::Mutex<Vec<u8>>) -> String {
+    output
+        .lock()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default()
+}
+
+/// 只保留最近一次启动的诊断；不保存命令行、Cookie、账户资料，也不上传。
+fn save_startup_diagnostic(profile: &Path, browser: &Path, result: &str, stderr: &str) {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let sanitized = stderr
+        .replace(profile.to_string_lossy().as_ref(), "[专属资料目录]")
+        .replace(browser.to_string_lossy().as_ref(), "[浏览器]");
+    if let Ok(mut file) = options.open(profile.join("browser-startup.log")) {
+        let _ = writeln!(
+            file,
+            "browser={}\nmode=headless\nresult={result}\n{sanitized}",
+            browser.file_name().unwrap_or_default().to_string_lossy()
+        );
+    }
 }
 
 fn chromium_profile_dir() -> PathBuf {
@@ -343,16 +392,44 @@ impl ChromiumSession {
         Self::start_with_args(profile_dir, &[]).await
     }
 
+    /// 启动查询浏览器。任何启动阶段的失败都归为 [`ApiError::BrowserUnavailable`]：
+    /// 那不是 Apple 返回的结果，界面需要据此给出「浏览器未连接」的处理步骤。
     async fn start_with_args(
         profile_dir: PathBuf,
         network_args: &[String],
     ) -> Result<Self, ApiError> {
         let chrome = find_chromium().ok_or_else(|| {
-            ApiError::Transport(
-                "未找到 Google Chrome 或 Microsoft Edge；Apple 当前库存接口要求完整 Chromium 浏览器会话"
-                    .into(),
+            ApiError::BrowserUnavailable(
+                "未找到 Google Chrome 或 Microsoft Edge，请安装受支持的浏览器后重试".into(),
             )
         })?;
+        let startup = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let result =
+            Self::launch(profile_dir.clone(), chrome.clone(), network_args, startup.clone()).await;
+        if let Err(error) = &result
+            && profile_dir.is_dir()
+        {
+            save_startup_diagnostic(
+                &profile_dir,
+                &chrome,
+                &error.to_string(),
+                &startup_output(&startup),
+            );
+        }
+        result.map_err(|error| {
+            ApiError::BrowserUnavailable(match error {
+                ApiError::Transport(detail) | ApiError::BrowserUnavailable(detail) => detail,
+                other => other.to_string(),
+            })
+        })
+    }
+
+    async fn launch(
+        profile_dir: PathBuf,
+        chrome: PathBuf,
+        network_args: &[String],
+        startup: Arc<std::sync::Mutex<Vec<u8>>>,
+    ) -> Result<Self, ApiError> {
         let is_edge = chrome
             .to_string_lossy()
             .to_ascii_lowercase()
@@ -372,7 +449,7 @@ impl ChromiumSession {
             "正在启动 Apple 专属 Chromium 会话：profile={}，mode=headless",
             profile_dir.display()
         );
-        let mut command = Command::new(chrome);
+        let mut command = Command::new(&chrome);
         command
             .args([
                 "--remote-debugging-address=127.0.0.1",
@@ -385,7 +462,8 @@ impl ChromiumSession {
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            // 启动失败时要能说清原因（目录锁、权限、浏览器崩溃），stderr 由后台线程持续排空。
+            .stderr(Stdio::piped());
         // 无头模式：不出现窗口和 Dock 图标，也不会抢焦点。无头浏览器的破绽由
         // 启动后的 UA 与 Client Hints 覆盖补上，见 `apply_browser_identity`。
         command.args([
@@ -413,6 +491,7 @@ impl ChromiumSession {
             child,
             process_group_id,
         };
+        capture_startup_output(&mut process.child, startup.clone());
 
         let deadline = Instant::now() + CHROME_START_TIMEOUT;
         let targets_url = format!("http://127.0.0.1:{debug_port}/json/list");
@@ -422,9 +501,10 @@ impl ChromiumSession {
                 .try_wait()
                 .map_err(|e| ApiError::Transport(format!("无法检查 Chromium 状态：{e}")))?
             {
-                return Err(ApiError::Transport(format!(
-                    "Chromium 启动后立即退出：{status}"
-                )));
+                // 给排空线程一点时间读完退出前写出的最后几行。
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let detail = startup_exit_detail(status.code(), &startup_output(&startup));
+                return Err(ApiError::Transport(detail));
             }
             if Instant::now() >= deadline {
                 return Err(ApiError::Transport("等待 Chromium 启动超时".into()));
@@ -1991,7 +2071,7 @@ impl AppleChromiumFetcher {
             return Err(error);
         }
         if let Some(detail) = guard.session_start_failure.clone() {
-            return Err(ApiError::Transport(detail));
+            return Err(ApiError::BrowserUnavailable(detail));
         }
         let nearby_unavailable = cache_key
             .as_ref()
@@ -2017,7 +2097,9 @@ impl AppleChromiumFetcher {
                     Ok(session) => guard.session = Some(session),
                     Err(error) => {
                         let detail = match &error {
-                            ApiError::Transport(detail) => detail.clone(),
+                            ApiError::Transport(detail) | ApiError::BrowserUnavailable(detail) => {
+                                detail.clone()
+                            }
                             _ => error.to_string(),
                         };
                         guard.session_start_failure = Some(detail);
@@ -4130,6 +4212,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(profile_lock_pid(profile.path()), Some(29642));
+    }
+
+    #[tokio::test]
+    async fn 浏览器启动失败报告为浏览器未连接而不是网络故障() {
+        let (fetcher, _peer) = cdp_responses(Vec::new()).await;
+        {
+            let mut state = fetcher.state.lock().await;
+            state.session = None;
+            state.session_start_failure = Some(
+                "浏览器专属资料目录被占用，或无法取得目录锁（退出码 21）".into(),
+            );
+        }
+        let result = fetcher
+            .pickup_message(region_by_locale("zh_CN").unwrap(), "R390", &[test_target("one")], None)
+            .await;
+        match result {
+            Err(ApiError::BrowserUnavailable(detail)) => assert!(detail.contains("退出码 21")),
+            other => panic!("应当是 BrowserUnavailable：{other:?}"),
+        }
+        let reason = ApiError::BrowserUnavailable("x".into()).into_unknown_reason();
+        assert!(matches!(reason, UnknownReason::BrowserUnavailable { .. }));
     }
 
     #[test]

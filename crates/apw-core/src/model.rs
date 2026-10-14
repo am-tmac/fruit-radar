@@ -62,6 +62,7 @@ impl Availability {
             Self::Unknown(UnknownReason::StorePickupUnavailable { .. }) => "暂停取货",
             Self::Unknown(UnknownReason::ProductNotReturned { .. }) => "未返回型号",
             Self::Unknown(UnknownReason::CoolingDown { .. }) => "冷却中",
+            Self::Unknown(UnknownReason::BrowserUnavailable { .. }) => "浏览器未连接",
             Self::Unknown(_) => "未知",
         }
     }
@@ -82,6 +83,8 @@ impl Availability {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum UnknownReason {
+    /// 本机浏览器启动或连接失败。保留明确原因，不能归为无货或网络故障。
+    BrowserUnavailable { detail: String },
     /// 刚加进监控列表，还没轮到它。这是一种「正常」的未知。
     NotYetChecked,
     /// Apple 已返回商品信息，但门店取货状态尚未开放或仍待公布。
@@ -145,6 +148,7 @@ impl UnknownReason {
             }
             Self::AppleError { message } => format!("Apple 返回错误：{message}"),
             Self::Transport { detail } => format!("网络请求失败：{detail}"),
+            Self::BrowserUnavailable { detail } => format!("查询浏览器未连接：{detail}"),
         }
     }
 

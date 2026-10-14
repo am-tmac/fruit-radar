@@ -63,6 +63,10 @@ pub enum ApiError {
     /// 网络层面的失败。
     #[error("网络请求失败：{0}")]
     Transport(String),
+
+    /// 本机查询浏览器没有成功建立会话，并非 Apple 返回的库存结果。
+    #[error("查询浏览器未连接：{0}")]
+    BrowserUnavailable(String),
 }
 
 impl ApiError {
@@ -89,6 +93,7 @@ impl ApiError {
             }
             Self::Apple(message) => UnknownReason::AppleError { message },
             Self::Transport(detail) => UnknownReason::Transport { detail },
+            Self::BrowserUnavailable(detail) => UnknownReason::BrowserUnavailable { detail },
         }
     }
 

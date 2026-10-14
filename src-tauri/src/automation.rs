@@ -41,6 +41,12 @@ impl Admission {
         Some(Ticket { generation, key, owner: Arc::downgrade(&self.0) })
     }
     pub fn cancel(&mut self) { self.0.lock().unwrap().pending.clear(); }
+    /// 这件商品是否有一次自动加购正在排队或进行（尚未提交）。
+    pub fn is_pending(&self, locale: &str, sku: &str) -> bool {
+        let state = self.0.lock().unwrap();
+        state.pending.get(&(locale.to_string(), sku.to_string()))
+            .is_some_and(|(_, created)| created.elapsed() < Duration::from_secs(30))
+    }
     pub fn valid(&self, ticket: &Ticket) -> bool {
         if !ticket.owner.ptr_eq(&Arc::downgrade(&self.0)) { return false; }
         self.0.lock().unwrap().pending.get(&ticket.key).is_some_and(|(id, created)|
@@ -65,6 +71,15 @@ pub fn safe_to_navigate(url: &str) -> bool {
     path.ends_with("/shop/bag") || path.contains("/shop/buy-") || path.contains("/shop/product/")
 }
 
+/// 自动结账开始前的检查：买家窗口里任何一页已经是订单确认/订单详情页时不能开始，
+/// 订单可能已经生成，再走一遍会重复下单。结账页本身允许：结账从购物袋重新开始。
+///
+/// 自动加购的 [`safe_to_navigate`] 守卫不用在这里：结账流程本来就要进入结账页。
+pub fn checkout_may_start(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    !(lower.contains("thankyou") || lower.contains("/shop/order/") || lower.contains("/shop/checkout/order"))
+}
+
 pub struct OrderLease(std::sync::Arc<std::sync::atomic::AtomicBool>);
 impl OrderLease {
     pub fn acquire(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Option<Self> {
@@ -87,6 +102,16 @@ mod tests {
         assert!(!safe_to_navigate("https://idmsa.apple.com/"));
         assert!(safe_to_navigate("about:blank"));
         assert!(safe_to_navigate("https://www.apple.com.cn/shop/bag"));
+    }
+    #[test]
+    fn checkout_never_starts_over_an_existing_order_page() {
+        assert!(checkout_may_start("https://www.apple.com.cn/shop/bag"));
+        assert!(checkout_may_start("https://secure.www.apple.com.cn/shop/checkout?_s=Review"));
+        assert!(checkout_may_start("about:blank"));
+        assert!(!checkout_may_start("https://secure.www.apple.com.cn/shop/checkout/thankyou"));
+        assert!(!checkout_may_start("https://www.apple.com.cn/shop/order/detail/12345"));
+        // 结账页对自动加购仍然是禁区。
+        assert!(!safe_to_navigate("https://secure.www.apple.com.cn/shop/checkout?_s=Review"));
     }
     #[test]
     fn order_listener_is_single_instance_and_releases_on_drop() {

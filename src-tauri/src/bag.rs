@@ -10,12 +10,14 @@
 //! # 边界
 //!
 //! 这里只做两件事：**选 AppleCare 选项**、**点「添加到购物袋」**。
-//! 不填地址、不碰支付、不提交订单 —— 停在购物袋页面上，剩下的交给用户。
+//! 不填地址、不碰支付、不提交订单 —— 停在购物袋页面上。用户另外开启自动结账
+//! （`checkout` 模块，默认关闭）时，由它在同一个会话里接手；付款始终交给用户。
 //! 这是刻意的：付款是不可撤销的，把最后一步交给人的成本只是一次点击，
 //! 而自动结账出了错是无法挽回的。
 
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
@@ -128,12 +130,108 @@ impl PickupInfo {
     }
 }
 
+/// 本应用亲自启动的买家浏览器进程。
+///
+/// 与会话分开持有、可共享：应用退出时，结账或加购流程可能正占着会话锁等页面，
+/// 退出屏障不能为了拿锁而卡住，所以通过这个句柄直接回收进程。接管的是用户
+/// 已开着的实例（不是本应用启动的）时没有句柄，退出时不去动它。
+#[derive(Clone, Debug)]
+pub struct BuyerProcess(Arc<Mutex<Option<Child>>>);
+
+impl BuyerProcess {
+    fn new(child: Child) -> Self {
+        Self(Arc::new(Mutex::new(Some(child))))
+    }
+
+    /// 先 SIGTERM 让浏览器把登录 Cookie 写完，有界等待后再强杀并回收。可重复调用。
+    pub fn terminate(&self) {
+        let Some(mut child) = self.0.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+            return;
+        };
+        #[cfg(unix)]
+        {
+            unsafe {
+                libc::kill(child.id() as i32, libc::SIGTERM);
+            }
+            for _ in 0..40 {
+                if child.try_wait().ok().flatten().is_some() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[cfg(test)]
+    pub fn for_test(child: Child) -> Self {
+        Self::new(child)
+    }
+}
+
+/// 本应用启动过的全部买家浏览器进程。
+///
+/// 应用退出时由退出屏障调用 [`close_and_terminate`](Self::close_and_terminate)：
+/// 先关闭登记（之后新启动的进程会被立即回收、启动方得到错误），再回收已登记的
+/// 进程。登记与关闭在同一把锁里判断，不存在「检查后才启动」的漏网窗口。
+#[derive(Default)]
+pub struct BuyerRegistry(Mutex<(bool, Vec<BuyerProcess>)>);
+
+impl BuyerRegistry {
+    pub fn register(&self, process: BuyerProcess) -> Result<(), String> {
+        let mut guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.0 {
+            drop(guard);
+            process.terminate();
+            return Err("应用正在退出，不再打开买家浏览器".into());
+        }
+        guard.1.push(process);
+        Ok(())
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).0
+    }
+
+    pub fn close_and_terminate(&self) {
+        let processes = {
+            let mut guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            guard.0 = true;
+            std::mem::take(&mut guard.1)
+        };
+        for process in processes {
+            process.terminate();
+        }
+    }
+}
+
+/// 取出（必要时启动）买家会话，并把本应用启动的进程登记到 `registry`。
+pub async fn ensure_session<'a>(
+    slot: &'a mut Option<BagSession>,
+    profile: &Path,
+    registry: &BuyerRegistry,
+) -> Result<&'a mut BagSession, String> {
+    if registry.is_closed() {
+        return Err("应用正在退出，不再打开买家浏览器".into());
+    }
+    if slot.is_none() {
+        let session = BagSession::start_visible(profile).await?;
+        if let Some(process) = session.process() {
+            registry.register(process)?;
+        }
+        *slot = Some(session);
+    }
+    slot.as_mut().ok_or_else(|| "买家窗口不可用".to_string())
+}
+
 /// 可见的买家浏览器会话。
 ///
 /// 刻意**不实现 Drop 去杀进程**：用户可能正在这个窗口里结账，程序自己
-/// 关窗口是最糟的时机。进程生命周期交由用户和应用退出决定。
+/// 关窗口是最糟的时机。进程生命周期交由用户和应用退出决定（退出时经
+/// [`BuyerProcess::terminate`] 回收本应用启动的进程）。
 pub struct BagSession {
-    child: Option<Child>,
+    child: Option<BuyerProcess>,
     socket: Socket,
     next_command_id: u64,
 }
@@ -196,12 +294,24 @@ impl BagSession {
                 return Err(err);
             }
         };
-        let socket = attach(port).await?;
+        let socket = match attach(port).await {
+            Ok(socket) => socket,
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(err);
+            }
+        };
         Ok(Self {
-            child: Some(child),
+            child: Some(BuyerProcess::new(child)),
             socket,
             next_command_id: 1,
         })
+    }
+
+    /// 本应用启动的浏览器进程句柄；接管已有实例时为 `None`。
+    pub fn process(&self) -> Option<BuyerProcess> {
+        self.child.clone()
     }
 
     /// 地址栏当前地址，用于诊断和活动日志。
@@ -233,11 +343,10 @@ impl BagSession {
         }
     }
 
-    /// 关掉买家浏览器。目前只在用户显式要求时调用。
+    /// 关掉本应用启动的买家浏览器。用户显式要求或应用退出时调用。
     pub fn shutdown(&mut self) {
-        if let Some(child) = self.child.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Some(child) = self.child.as_ref() {
+            child.terminate();
         }
     }
 
@@ -547,7 +656,7 @@ impl BagSession {
         }
     }
 
-    async fn command(&mut self, method: &str, params: Value) -> Result<Value, String> {
+    pub(crate) async fn command(&mut self, method: &str, params: Value) -> Result<Value, String> {
         let id = self.next_command_id;
         self.next_command_id = self.next_command_id.wrapping_add(1).max(1);
         let request = json!({ "id": id, "method": method, "params": params });
@@ -583,7 +692,11 @@ impl BagSession {
             .map_err(|_| format!("浏览器命令 {method} 超时"))?
     }
 
-    async fn evaluate(&mut self, expression: &str, await_promise: bool) -> Result<Value, String> {
+    pub(crate) async fn evaluate(
+        &mut self,
+        expression: &str,
+        await_promise: bool,
+    ) -> Result<Value, String> {
         let result = self
             .command(
                 "Runtime.evaluate",
@@ -713,6 +826,24 @@ pub async fn ensure_no_checkout_pages(profile: &Path) -> Result<(), String> {
     if pages.iter().filter(|p| p.kind == "page")
         .any(|p| !crate::automation::safe_to_navigate(p.url.as_deref().unwrap_or_default())) {
         return Err("买家窗口含结账、订单或未知页面；自动加购已跳过".into());
+    }
+    Ok(())
+}
+
+/// 自动结账开始前检查所有买家标签页：有订单确认页时拒绝开始。浏览器没开着时放行
+/// （会新开一个窗口，自然没有订单页）。
+pub async fn ensure_no_order_pages(profile: &Path) -> Result<(), String> {
+    let Some(port) = live_port(profile).await else {
+        return Ok(());
+    };
+    let pages: Vec<DebugTarget> = tokio::time::timeout(Duration::from_secs(10), async {
+        reqwest::get(format!("http://127.0.0.1:{port}/json/list")).await?
+            .json().await
+    }).await.map_err(|_| "检查买家页面超时")?
+        .map_err(|_: reqwest::Error| "检查买家页面失败")?;
+    if pages.iter().filter(|p| p.kind == "page")
+        .any(|p| !crate::automation::checkout_may_start(p.url.as_deref().unwrap_or_default())) {
+        return Err("买家窗口里已有订单页面，订单可能已经生成；自动结账没有开始".into());
     }
     Ok(())
 }
@@ -918,5 +1049,32 @@ mod tests {
         }
         tokio::time::sleep(Duration::from_millis(600)).await;
         Ok(())
+    }
+
+    #[test]
+    fn closed_registry_reaps_late_processes_immediately() {
+        let registry = BuyerRegistry::default();
+        let early = Command::new("sleep").arg("60").spawn().unwrap();
+        let early_pid = early.id() as i32;
+        registry.register(BuyerProcess::for_test(early)).unwrap();
+        registry.close_and_terminate();
+        assert_eq!(unsafe { libc::kill(early_pid, 0) }, -1);
+        assert!(registry.is_closed());
+        let late = Command::new("sleep").arg("60").spawn().unwrap();
+        let late_pid = late.id() as i32;
+        assert!(registry.register(BuyerProcess::for_test(late)).is_err());
+        assert_eq!(unsafe { libc::kill(late_pid, 0) }, -1, "退出后启动的进程必须立即回收");
+    }
+
+    #[test]
+    fn buyer_process_terminate_reaps_owned_child_and_is_idempotent() {
+        let child = Command::new("sleep").arg("60").spawn().unwrap();
+        let pid = child.id() as i32;
+        let process = BuyerProcess::for_test(child);
+        let shared = process.clone();
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+        shared.terminate();
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "买家浏览器进程应已回收");
+        process.terminate();
     }
 }
