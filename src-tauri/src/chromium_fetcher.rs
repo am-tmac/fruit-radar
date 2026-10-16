@@ -2612,6 +2612,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn loop_exit_without_exit_requested_reaps_query_child_and_unlocks_profile() {
+        let (fetcher, peer) = cdp_responses(Vec::new()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let cookie = dir.path().join("Cookies");
+        std::fs::write(&cookie, b"exit fallback cookies").unwrap();
+        let child = Command::new("sleep").arg("60").spawn().unwrap();
+        let pid = child.id();
+        {
+            let mut state = fetcher.state.lock().await;
+            let session = state.session.as_mut().unwrap();
+            session._process = ChromiumProcess { child, process_group_id: None };
+            session.profile_dir = dir.path().to_path_buf();
+            session._owner = Some(crate::query_profile::ProfileOwner::claim(dir.path()).unwrap());
+        }
+        let barrier = crate::exit_barrier::ExitBarrier::default();
+        let handle = tokio::runtime::Handle::current();
+        let ran = tokio::task::spawn_blocking(move || {
+            barrier.run_on_loop_exit(|| async { fetcher.shutdown().await }, |f| handle.block_on(f))
+        }).await.unwrap();
+        assert!(ran);
+        assert!(peer.await.unwrap());
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+        assert!(crate::query_profile::ProfileOwner::claim(dir.path()).is_ok());
+        assert_eq!(std::fs::read(cookie).unwrap(), b"exit fallback cookies");
+    }
+
+    #[tokio::test]
     async fn shutdown_reaps_owned_child_then_releases_persistent_profile() {
         let (fetcher, peer) = cdp_responses(Vec::new()).await;
         let dir = tempfile::tempdir().unwrap();

@@ -2071,6 +2071,19 @@ pub fn run() {
                     },
                     move || exit_app.exit(code.unwrap_or(0)),
                 );
+            } else if matches!(event, tauri::RunEvent::Exit) {
+                // macOS AppleScript/Dock termination can skip ExitRequested.
+                // Run-loop teardown must finish cleanup before returning.
+                let state = app.state::<AppState>();
+                state.exit_barrier.run_on_loop_exit(
+                    || async {
+                        shutdown_automation(&state.checkout, &state.buyers).await;
+                        let _control = state.control.lock().await;
+                        state.admission.lock().unwrap().cancel();
+                        shutdown_monitor(&state.watcher, &state.fetcher).await;
+                    },
+                    |cleanup| tauri::async_runtime::block_on(cleanup),
+                );
             }
         });
 }

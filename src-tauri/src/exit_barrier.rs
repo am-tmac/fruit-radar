@@ -43,4 +43,94 @@ impl ExitBarrier {
             exit();
         });
     }
+
+    /// Run-loop teardown (`RunEvent::Exit`). AppleScript/Dock quits deliver this
+    /// without any `ExitRequested`, so the async barrier never ran. Runs cleanup
+    /// synchronously unless the barrier already finished. Returns whether it ran.
+    pub(crate) fn run_on_loop_exit<F: Future<Output = ()>>(
+        &self,
+        cleanup: impl FnOnce() -> F,
+        block_on: impl FnOnce(F),
+    ) -> bool {
+        if self.0.load(Ordering::Acquire) == READY {
+            return false;
+        }
+        // Exit cannot be prevented: a newly spawned async task may never run.
+        // Existing cleanup is idempotent and serialized by the app control lock.
+        self.0.store(STOPPING, Ordering::Release);
+        block_on(cleanup());
+        self.0.store(READY, Ordering::Release);
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+    use std::sync::atomic::AtomicUsize;
+
+    fn block_on<F: Future<Output = ()>>(f: F) {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(f);
+    }
+
+    fn alive(pid: i32) -> bool {
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    #[test]
+    fn 只收到run_loop退出时也会回收自有子进程() {
+        // AppleScript/Dock 退出只发 RunEvent::Exit，从不发 ExitRequested。
+        let barrier = ExitBarrier::default();
+        let child = Command::new("sleep").arg("60").spawn().unwrap();
+        let pid = child.id() as i32;
+        let child_slot = std::sync::Mutex::new(Some(child));
+        let ran = barrier.run_on_loop_exit(
+            || async {
+                if let Some(mut c) = child_slot.lock().unwrap().take() {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                }
+            },
+            |f| block_on(f),
+        );
+        assert!(ran, "没走过 ExitRequested 时，run loop 退出必须执行清理");
+        assert!(!alive(pid), "查询浏览器子进程必须被回收");
+        assert!(barrier.is_exiting());
+    }
+
+    #[test]
+    fn 屏障已完成清理后run_loop退出不再重复执行() {
+        let barrier = ExitBarrier::default();
+        barrier.0.store(READY, Ordering::Release);
+        let calls = AtomicUsize::new(0);
+        let ran = barrier.run_on_loop_exit(
+            || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+            },
+            |f| block_on(f),
+        );
+        assert!(!ran);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn 异步清理还没做完时run_loop退出会同步补做() {
+        // ExitRequested 已经起了异步清理但进程马上就要结束：不能指望那个任务跑完。
+        let barrier = ExitBarrier::default();
+        barrier.0.store(STOPPING, Ordering::Release);
+        let calls = AtomicUsize::new(0);
+        let ran = barrier.run_on_loop_exit(
+            || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+            },
+            |f| block_on(f),
+        );
+        assert!(ran);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(barrier.0.load(Ordering::Acquire), READY);
+    }
 }

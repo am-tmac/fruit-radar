@@ -5,6 +5,7 @@
 > **这是 [suversal/apple-store-inventory-monitor](https://github.com/suversal/apple-store-inventory-monitor)（果到雷达 v1.0.4）的修改分支，由 am-tmac 维护，不是上游官方版本。**
 >
 > 与原版的差异（2026-09-13 起）：
+> - macOS 原生终止（包括 AppleScript 退出）可能只触发 `RunEvent::Exit`；新增同步退出清理兜底，等待自有查询/买家浏览器回收后才结束，不扫描或杀未知浏览器。
 > - 应用名、窗口标题与托盘提示改为「水果雷达」，Bundle ID 改为 `com.amtmac.fruitradar`
 > - 修复监控列表在窄窗口下「最后检查 / Bark / 删除」三列被裁掉、无法删除监控的布局问题：内容宽度上限 1180→1360px、收紧门店与型号列宽、滚动区补上横向滚动条、窗口默认尺寸 1360×900、最小 1200×700
 > - 自绘应用图标（用户提供的「彩虹飘带苹果」logo，量化为干净硬边），源文件与处理流程见 `assets/README.md`，改动后跑 `pnpm tauri icon assets/app-icon.png` 重新生成整套
