@@ -61,7 +61,8 @@ impl CdpPage for crate::bag::BagSession {
 }
 
 const BAG_URL: &str = "https://www.apple.com.cn/shop/bag";
-const POLL_INTERVAL: Duration = Duration::from_millis(150);
+/// 轮询页面状态的间隔。每次只是一条 Runtime.evaluate，本机往返约 1–3 毫秒。
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
 // Apple 的结账接口实测每次要 9 到 17 秒才返回，超时必须明显长于这个数，
 // 否则会在请求还没回来时重复点击，反而更慢。
 const ELEMENT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -69,7 +70,14 @@ const NAVIGATION_TIMEOUT: Duration = Duration::from_secs(45);
 /// 门店切换后日期和时段是异步加载的；超过这个时间仍没有时段，就按无需时段处理。
 const SLOT_TIMEOUT: Duration = Duration::from_secs(8);
 /// 门店页的状态连续这么久没有变化，才认为异步加载结束了。
-const SETTLE_WINDOW: Duration = Duration::from_millis(1200);
+///
+/// 原先是 1200 毫秒，每次结账要叠加 3–5 次。选门店、选时段之后 Apple 会在同一
+/// 个事件里把「继续」按钮置为禁用并发出校验请求，状态变化在一两次轮询之内就能
+/// 看到；稳定判定之后还要再确认门店与时段保持选中、按钮可用，所以 500 毫秒足够。
+const SETTLE_WINDOW: Duration = Duration::from_millis(500);
+/// 购物袋页（新文档）加载完、明确没有任何商品时，再等这么久仍为空就停下。
+/// 原先要等满 30 秒的元素超时。
+const EMPTY_BAG_GRACE: Duration = Duration::from_secs(2);
 const ORDER_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// 结账流程停下时所在的页面。
@@ -332,6 +340,9 @@ const LINE_ITEMS_JS: &str = r#"(() => {
     items,
     total: total ? total.innerText.replace(/\s+/g, ' ').trim() : '',
     canCheckout: !!document.querySelector('button[data-autom="checkout"]'),
+    // 打开购物袋前给旧文档打了标记：只有新文档加载完才算数，免得读到导航前的旧页面。
+    loaded: !window.__apwStaleBag && document.readyState === 'complete' && /\/shop\/bag/.test(location.pathname),
+    emptyNotice: /购物袋(目前)?(是|为)空/.test((document.body ? document.body.innerText : '').replace(/\s+/g, '')),
     canPlaceOrder: !!document.querySelector('button[data-autom="continue-button-placeOrder"]'),
   });
 })()"#;
@@ -343,6 +354,10 @@ struct Lines {
     total: String,
     can_checkout: bool,
     can_place_order: bool,
+    #[serde(default)]
+    loaded: bool,
+    #[serde(default)]
+    empty_notice: bool,
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -667,6 +682,8 @@ impl<P: CdpPage> Flow<'_, P> {
 
     async fn bag(&mut self) -> Result<(), CheckoutError> {
         self.report("自动结账：打开购物袋");
+        // 标记当前文档：导航完成后新文档不带这个标记，据此区分新旧页面。
+        let _ = self.session.evaluate("window.__apwStaleBag = true", false).await;
         let navigation = self
             .session
             .command("Page.navigate", json!({ "url": BAG_URL }))
@@ -682,26 +699,43 @@ impl<P: CdpPage> Flow<'_, P> {
                 format!("购物袋页面打不开：{error}"),
             ));
         }
-        let lines: Lines = self
-            .wait(
-                Stage::Bag,
-                LINE_ITEMS_JS,
-                ELEMENT_TIMEOUT,
-                "购物袋出现可结账的商品",
-                |lines: &Lines| lines.can_checkout && !lines.items.is_empty(),
-            )
-            .await
-            .map_err(|_| {
-                CheckoutError::new(
-                    Stage::Bag,
-                    "购物袋里没有可结账的商品，请先在买家窗口里登录并把商品加入购物袋",
-                )
-            })?;
+        let lines = self.wait_for_bag_items().await?;
         verify_items(&lines.items, &self.plan.product_name)
             .map_err(|message| CheckoutError::new(Stage::Bag, message))?;
         self.click(Stage::Bag, r#"button[data-autom="checkout"]"#, "结账")
             .await?;
         self.wait_for_step(Stage::Bag, "Fulfillment").await
+    }
+
+    /// 等购物袋出现可结账的商品。新文档已加载完、却明确没有商品时尽快停下，
+    /// 不再干等元素超时：空购物袋不会自己变满。
+    async fn wait_for_bag_items(&mut self) -> Result<Lines, CheckoutError> {
+        let stage = Stage::Bag;
+        let deadline = Instant::now() + ELEMENT_TIMEOUT;
+        let mut empty_since: Option<Instant> = None;
+        loop {
+            self.check_cancel(stage)?;
+            match self.read::<Lines>(LINE_ITEMS_JS).await {
+                Ok(lines) if lines.can_checkout && !lines.items.is_empty() => return Ok(lines),
+                Ok(lines) if lines.loaded && lines.items.is_empty() && !lines.can_checkout => {
+                    let since = *empty_since.get_or_insert_with(Instant::now);
+                    if lines.empty_notice || since.elapsed() >= EMPTY_BAG_GRACE {
+                        let message = verify_items(&[], &self.plan.product_name)
+                            .err()
+                            .unwrap_or_default();
+                        return Err(CheckoutError::new(stage, message));
+                    }
+                }
+                _ => empty_since = None,
+            }
+            if Instant::now() >= deadline {
+                return Err(CheckoutError::new(
+                    stage,
+                    "购物袋里没有可结账的商品，请先在买家窗口里登录并把商品加入购物袋",
+                ));
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
     }
 
     async fn fulfillment(&mut self) -> Result<(), CheckoutError> {
@@ -1052,7 +1086,8 @@ impl<P: CdpPage> Flow<'_, P> {
         if applied != slot {
             return Err(CheckoutError::new(stage, "取货时段没有选中"));
         }
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        // 不再固定睡 400 毫秒：调用方接着等「继续按钮可用」并要求页面状态稳定
+        // SETTLE_WINDOW，再确认门店与时段仍保持选中，校验请求引起的变化会被它看到。
         Ok(Some(slot))
     }
 
@@ -1421,9 +1456,40 @@ pub fn settings_after_checkout(
     if !disable || !current.checkout.enabled {
         return None;
     }
+    Some(disarmed(current))
+}
+
+/// 关掉自动结账总开关和「自动点立即下单」。只要有一次订单可能已经生成，两个都关：
+/// 只关总开关时，用户之后手动打开总开关会连带恢复自动下单。
+pub fn disarmed(current: &Settings) -> Settings {
     let mut next = current.clone();
     next.checkout.enabled = false;
-    Some(next)
+    next.checkout.place_order = false;
+    next
+}
+
+/// 界面整份保存设置时，自动结账的两个开关以后端为准。
+///
+/// 结账成功后后端会自己关掉开关；界面上那份设置可能还停留在旧值（事件晚到、
+/// 保存请求在关闭之前就已经发出、或窗口隐藏时 WebView 被挂起），整份保存会把
+/// 已关闭的开关重新写成开启，下次开始监控就会再下一单。开关只能通过
+/// 专门的命令（[`with_switches`]）改。
+pub fn merge_ui_settings(current: &Settings, mut incoming: Settings) -> Settings {
+    incoming.checkout.enabled = current.checkout.enabled;
+    incoming.checkout.place_order = current.checkout.place_order;
+    incoming
+}
+
+/// 用户在界面上明确切换自动结账开关。
+pub fn with_switches(current: &Settings, enabled: Option<bool>, place_order: Option<bool>) -> Settings {
+    let mut next = current.clone();
+    if let Some(enabled) = enabled {
+        next.checkout.enabled = enabled;
+    }
+    if let Some(place_order) = place_order {
+        next.checkout.place_order = place_order;
+    }
+    next
 }
 
 #[cfg(test)]
@@ -1614,7 +1680,8 @@ mod tests {
                 let items: Vec<_> = self.items.iter().map(|(n, q)| json!({"name": n, "quantity": q})).collect();
                 return Ok(js(json!({
                     "items": items, "total": "RMB 0.00",
-                    "canCheckout": self.step == "Bag",
+                    "canCheckout": self.step == "Bag" && !self.items.is_empty(),
+                    "loaded": self.step == "Bag" || self.step == "Review",
                     "canPlaceOrder": self.step == "Review"
                 })));
             }
@@ -1728,9 +1795,44 @@ mod tests {
         assert_eq!(page.clicked("continue-button-placeOrder"), 1);
         let next = settings_after_checkout(&settings, &result).expect("应当写回设置");
         assert!(!next.checkout.enabled);
-        assert!(next.checkout.place_order, "只关总开关，不改用户的其他选择");
+        assert!(!next.checkout.place_order, "已下单后自动下单也必须关闭，重新开始监控不能再下第二单");
         // 关掉之后同一份设置不会再触发结账。
         assert!(!(next.checkout.enabled && next.is_checkout_target(&target)));
+    }
+
+    #[tokio::test]
+    async fn 购物袋页加载完且明显为空时几秒内停下_不干等三十秒() {
+        let (target, settings) = fixture_settings(true);
+        let plan = CheckoutPlan::new(&target, &settings, &Catalog::new(), true);
+        let runner = CheckoutRunner::new();
+        let lease = runner.try_begin().unwrap();
+        let mut page = FakePage::new(Vec::new());
+        let started = Instant::now();
+        let result = runner.run(&lease, &mut page, &plan, &|_| {}).await;
+        let error = result.clone().unwrap_err();
+        assert_eq!(error.stage, Stage::Bag);
+        assert!(error.message.contains("购物袋是空的"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(6), "空购物袋等了 {:?}", started.elapsed());
+        assert!(page.clicks.is_empty());
+        assert!(settings_after_checkout(&settings, &result).is_none());
+    }
+
+    #[tokio::test]
+    async fn 门店页固定等待缩短_完整流程仍逐项确认() {
+        let (target, settings) = fixture_settings(false);
+        let plan = CheckoutPlan::new(&target, &settings, &Catalog::new(), false);
+        let runner = CheckoutRunner::new();
+        let lease = runner.try_begin().unwrap();
+        let mut page = FakePage::new(vec![("测试商品 256GB", "1")]);
+        let started = Instant::now();
+        let result = runner.run(&lease, &mut page, &plan, &|_| {}).await;
+        let elapsed = started.elapsed();
+        assert!(matches!(result, Ok(CheckoutOutcome::ReachedReview { .. })), "{result:?}");
+        // 旧实现：3 次 1.2s 稳定窗口 + 0.4s 固定等待 ≈ 4s。页面立即就绪时应明显更快。
+        assert!(elapsed < Duration::from_millis(2500), "页面已就绪仍耗时 {elapsed:?}");
+        // 安全核对仍在：门店与时段在点击继续前被反复读取，继续按钮只点一次。
+        assert!(page.scripts.iter().filter(|s| s.contains("searchPending")).count() >= 3);
+        assert_eq!(page.clicked("fulfillment-continue-button"), 1);
     }
 
     #[tokio::test]
@@ -1793,11 +1895,47 @@ mod tests {
         assert!(redact_contact("Apple 上海", &single).contains("上海"));
     }
 
+    #[tokio::test]
+    async fn 下单后关闭的开关会落盘_界面旧副本整份保存也不能重新打开() {
+        let (target, settings) = fixture_settings(true);
+        let dir = tempfile::tempdir().unwrap();
+        let store = apw_core::config::SettingsStore::at(dir.path().join("settings.v2.json"));
+        store.save(&settings).unwrap();
+        // 界面在结账前拿到的副本：两个开关都开着。
+        let stale_ui_copy = store.load().unwrap();
+        assert!(stale_ui_copy.checkout.enabled && stale_ui_copy.checkout.place_order);
+
+        let plan = CheckoutPlan::new(&target, &settings, &Catalog::new(), true);
+        let runner = CheckoutRunner::new();
+        let lease = runner.try_begin().unwrap();
+        let mut page = FakePage::new(vec![("测试商品 256GB", "1")]);
+        let result = runner.run(&lease, &mut page, &plan, &|_| {}).await;
+        assert!(matches!(result, Ok(CheckoutOutcome::OrderSubmitted { .. })), "{result:?}");
+        let after_order = settings_after_checkout(&settings, &result).expect("应当关闭开关");
+        store.save(&after_order).unwrap();
+
+        // 之后界面因为别的字段（例如取货信息失焦）整份保存旧副本。
+        let mut ui_save = stale_ui_copy.clone();
+        ui_save.pickup_first_name = "FixtureOther".into();
+        let saved = merge_ui_settings(&after_order, ui_save);
+        store.save(&saved).unwrap();
+        let on_disk = store.load().unwrap();
+        assert!(!on_disk.checkout.enabled, "旧副本把自动结账重新打开了");
+        assert!(!on_disk.checkout.place_order, "旧副本把自动下单重新打开了");
+        assert_eq!(on_disk.pickup_first_name, "FixtureOther", "其他字段照常保存");
+        assert!(!hit_actions(&on_disk, &target).checkout, "重新开始监控也不会再结账");
+
+        // 用户明确再打开时才生效。
+        let reenabled = with_switches(&on_disk, Some(true), None);
+        assert!(reenabled.checkout.enabled && !reenabled.checkout.place_order);
+    }
+
     #[test]
     fn 提交订单这一步出错时也关闭开关() {
         let (_, settings) = fixture_settings(true);
         let failed = Err(CheckoutError::new(Stage::PlaceOrder, "超时"));
-        assert!(!settings_after_checkout(&settings, &failed).unwrap().checkout.enabled);
+        let next = settings_after_checkout(&settings, &failed).unwrap();
+        assert!(!next.checkout.enabled && !next.checkout.place_order);
         let failed = Err(CheckoutError::new(Stage::Billing, "没有该付款方式"));
         assert!(settings_after_checkout(&settings, &failed).is_none());
     }

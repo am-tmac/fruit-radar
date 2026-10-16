@@ -207,22 +207,62 @@ impl BuyerRegistry {
 }
 
 /// 取出（必要时启动）买家会话，并把本应用启动的进程登记到 `registry`。
+///
+/// 缓存的会话先用一条最轻的命令探一下：用户关掉窗口、浏览器重启或连接被重置后，
+/// 旧连接只会一直报 `closed connection` / `Broken pipe`。这时丢掉旧连接，重新
+/// 接管（或按原规则启动）一次，而不是让这一步失败。丢弃连接不会结束任何进程。
 pub async fn ensure_session<'a>(
     slot: &'a mut Option<BagSession>,
     profile: &Path,
     registry: &BuyerRegistry,
 ) -> Result<&'a mut BagSession, String> {
+    ensure_session_with(slot, registry, || BagSession::start_visible(profile)).await
+}
+
+/// 探活用的命令超时：本机 DevTools 正常往返只要几毫秒。
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+pub(crate) async fn ensure_session_with<'a, F, Fut>(
+    slot: &'a mut Option<BagSession>,
+    registry: &BuyerRegistry,
+    connect: F,
+) -> Result<&'a mut BagSession, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<BagSession, String>>,
+{
     if registry.is_closed() {
         return Err("应用正在退出，不再打开买家浏览器".into());
     }
+    if let Some(session) = slot.as_mut()
+        && !session.alive().await
+    {
+        eprintln!("买家浏览器调试连接已断开，丢弃后重新连接");
+        *slot = None;
+    }
     if slot.is_none() {
-        let session = BagSession::start_visible(profile).await?;
+        let session = connect().await?;
         if let Some(process) = session.process() {
             registry.register(process)?;
         }
         *slot = Some(session);
     }
     slot.as_mut().ok_or_else(|| "买家窗口不可用".to_string())
+}
+
+/// 错误是否说明 DevTools 连接本身已经不可用（而不是页面或命令层面的错误）。
+pub fn connection_lost(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "closed connection",
+        "broken pipe",
+        "connection reset",
+        "already closed",
+        "调试连接意外关闭",
+        "not connected",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 /// 可见的买家浏览器会话。
@@ -307,6 +347,17 @@ impl BagSession {
             socket,
             next_command_id: 1,
         })
+    }
+
+    /// 连接是否还能用：发一条最轻的命令，有界等待。
+    async fn alive(&mut self) -> bool {
+        let probe = self.command("Runtime.evaluate", json!({ "expression": "1", "returnByValue": true }));
+        match tokio::time::timeout(PROBE_TIMEOUT, probe).await {
+            Ok(Ok(_)) => true,
+            Ok(Err(error)) => !connection_lost(&error),
+            // 本机连接 3 秒都没有回应，按断开处理；丢弃连接不影响浏览器进程。
+            Err(_) => false,
+        }
     }
 
     /// 本应用启动的浏览器进程句柄；接管已有实例时为 `None`。
@@ -1049,6 +1100,91 @@ mod tests {
         }
         tokio::time::sleep(Duration::from_millis(600)).await;
         Ok(())
+    }
+
+    /// 本机假 DevTools 端点：应答 `n` 条命令后关闭连接（模拟用户关窗口/浏览器退出）。
+    async fn fake_page(answers: usize) -> (String, tokio::task::JoinHandle<usize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut served = 0;
+            while served < answers {
+                let Some(Ok(Message::Text(text))) = socket.next().await else { break };
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let reply = json!({ "id": request["id"], "result": { "result": { "value": "ok" } } });
+                socket.send(Message::Text(reply.to_string().into())).await.unwrap();
+                served += 1;
+            }
+            // 不发 Close 帧直接断开，和日志里的 "Connection reset without closing handshake" 一致。
+            drop(socket);
+            served
+        });
+        (url, peer)
+    }
+
+    async fn session_to(url: &str) -> BagSession {
+        let (socket, _) = connect_async(url).await.unwrap();
+        BagSession { child: None, socket, next_command_id: 1 }
+    }
+
+    #[tokio::test]
+    async fn 买家会话连接已断开时自动重连一次_不让这一步失败() {
+        let (stale_url, stale_peer) = fake_page(1).await;
+        let mut slot = Some(session_to(&stale_url).await);
+        // 第一条命令正常，随后浏览器一端断开。
+        slot.as_mut().unwrap().evaluate("1", false).await.unwrap();
+        assert_eq!(stale_peer.await.unwrap(), 1);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (fresh_url, fresh_peer) = fake_page(2).await;
+        let registry = BuyerRegistry::default();
+        let reconnects = std::sync::atomic::AtomicUsize::new(0);
+        let session = ensure_session_with(&mut slot, &registry, || async {
+            reconnects.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(session_to(&fresh_url).await)
+        })
+        .await
+        .expect("断开的会话应当被丢弃并重新连接");
+        session
+            .navigate("https://www.apple.com.cn/shop/bag")
+            .await
+            .expect("重连后的命令应当成功，而不是 closed connection");
+        assert_eq!(reconnects.load(std::sync::atomic::Ordering::SeqCst), 1);
+        drop(slot);
+        assert!(fresh_peer.await.unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn 健康的买家会话不重连_退出后不再重连() {
+        let (url, _peer) = fake_page(4).await;
+        let mut slot = Some(session_to(&url).await);
+        let registry = BuyerRegistry::default();
+        let reconnects = std::sync::atomic::AtomicUsize::new(0);
+        ensure_session_with(&mut slot, &registry, || async {
+            reconnects.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err("不应重连".to_string())
+        })
+        .await
+        .expect("健康会话直接复用");
+        assert_eq!(reconnects.load(std::sync::atomic::Ordering::SeqCst), 0);
+        registry.close_and_terminate();
+        assert!(ensure_session_with(&mut slot, &registry, || async { Err("x".to_string()) }).await.is_err());
+    }
+
+    #[test]
+    fn 能识别连接断开类错误() {
+        for message in [
+            "发送浏览器命令 Page.navigate 失败：Trying to work with closed connection",
+            "发送浏览器命令 Page.navigate 失败：IO error: Broken pipe (os error 32)",
+            "读取浏览器响应失败：WebSocket protocol error: Connection reset without closing handshake",
+            "浏览器调试连接意外关闭",
+        ] {
+            assert!(connection_lost(message), "{message}");
+        }
+        assert!(!connection_lost("浏览器命令 Runtime.evaluate 超时"));
+        assert!(!connection_lost("页面脚本执行出错（详见日志）"));
     }
 
     #[test]

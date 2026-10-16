@@ -275,3 +275,33 @@ test("checkout test run waits for pending settings and never auto-starts monitor
   assert.deepEqual(ctx.calls, ["save_settings", "test_checkout"]);
   assert.equal(ctx.calls.includes("start_watching"), false);
 });
+
+test("checkout switches use the dedicated command and a later full save keeps the backend's disarmed switches", async () => {
+  const ctx = await setup();
+  const originalInvoke = invoke;
+  let backend = { ...defaults, checkout: { ...defaults.checkout, enabled: true, placeOrder: true } };
+  invoke = async (command, args) => {
+    if (command === "set_checkout_switches") {
+      ctx.calls.push(command);
+      backend = { ...backend, checkout: { ...backend.checkout,
+        ...(args.enabled === undefined ? {} : { enabled: args.enabled }),
+        ...(args.placeOrder === undefined ? {} : { placeOrder: args.placeOrder }) } };
+      return backend;
+    }
+    if (command === "get_settings") return backend;
+    if (command === "is_running") return false;
+    if (["list_regions", "list_categories", "get_snapshot", "list_stores", "list_products"].includes(command)) return [];
+    return originalInvoke(command, args);
+  };
+  await ctx.store.connect();
+  ctx.calls.length = 0;
+  assert.equal(typeof ctx.store.setCheckoutSwitches, "function");
+  assert.equal(await ctx.store.setCheckoutSwitches({ enabled: true }), true);
+  assert.deepEqual(ctx.calls, ["set_checkout_switches"]);
+  assert.equal(ctx.store.watcherStore.getSnapshot().settings.checkout.enabled, true);
+  // 后端在下单后关掉开关并推送；界面随后整份保存别的字段时，带的是关闭后的值。
+  globalThis.__listeners["watcher://settings"]({ payload: { ...backend, checkout: { ...backend.checkout, enabled: false, placeOrder: false } } });
+  await ctx.store.saveSettings({ pickupFirstName: "FixtureOther" });
+  assert.equal(ctx.persisted().checkout.enabled, false);
+  assert.equal(ctx.persisted().checkout.placeOrder, false);
+});

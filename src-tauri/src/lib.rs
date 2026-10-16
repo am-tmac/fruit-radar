@@ -576,7 +576,9 @@ async fn save_settings(
 ) -> Result<Settings, String> {
     let _control = state.control.lock().await;
     state.admission.lock().unwrap().cancel();
-    let mut next = settings;
+    // 自动结账的两个开关以后端为准，只能经 set_checkout_switches 修改：结账成功后
+    // 后端已经关掉它们，界面那份旧副本整份保存时不能把它们重新打开。
+    let mut next = checkout::merge_ui_settings(&state.settings_snapshot(), settings);
     next.normalize();
     state.catalog.hydrate_watch_targets(&mut next.targets);
     state.catalog.hydrate_store_targets(&mut next.targets);
@@ -594,6 +596,50 @@ async fn save_settings(
     state.fetcher.set_network(next.network.clone()).await;
     apw_core::apple::Fetcher::set_backoff_enabled(&state.fetcher, next.backoff_enabled).await;
     Ok(next)
+}
+
+/// 用户在界面上切换「到货后自动结账」或「自动点立即下单」。
+#[tauri::command]
+async fn set_checkout_switches(
+    app: AppHandle,
+    enabled: Option<bool>,
+    place_order: Option<bool>,
+) -> Result<Settings, String> {
+    let state = app.state::<AppState>();
+    let _control = state.control.lock().await;
+    let mut next = checkout::with_switches(&state.settings_snapshot(), enabled, place_order);
+    next.normalize();
+    state.put_settings(next.clone())?;
+    let _ = app.emit(SETTINGS_CHANNEL, &next);
+    Ok(next)
+}
+
+/// 发现新订单后关闭自动结账与自动下单并落盘、通知界面。
+///
+/// 订单可能是自动结账点出来的，也可能是用户在买家窗口里手动下的；只要已经有订单，
+/// 再次到货时自动结账都可能重复下单，所以一律关掉。
+async fn disarm_checkout_after_order(app: &AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let _control = state.control.lock().await;
+    let current = state.settings_snapshot();
+    if !current.checkout.enabled && !current.checkout.place_order {
+        return;
+    }
+    let next = checkout::disarmed(&current);
+    match state.put_settings(next.clone()) {
+        Ok(()) => {
+            let _ = app.emit(SETTINGS_CHANNEL, &next);
+            let _ = app.emit(
+                NOTICE_CHANNEL,
+                "检测到新订单：自动结账与自动下单已关闭并保存，避免重复下单。",
+            );
+        }
+        Err(err) => {
+            let _ = app.emit(NOTICE_CHANNEL, format!("关闭自动结账开关失败：{err}"));
+        }
+    }
 }
 
 /// Clash 线路测试结果。只访问本机控制接口和端口，不向 Apple 发请求。
@@ -890,13 +936,24 @@ async fn add_target_to_bag(
     target: &Target,
     ticket: Option<automation::Ticket>,
 ) -> Result<bag::BagOutcome, String> {
+    let state = app.state::<AppState>();
+    let mut guard = state.bag.lock().await;
+    add_target_to_bag_locked(app, target, ticket, &mut guard).await
+}
+
+/// 同上，调用方已持有买家会话锁（到货后「加购 → 结账」在同一次持锁里完成）。
+async fn add_target_to_bag_locked(
+    app: &AppHandle,
+    target: &Target,
+    ticket: Option<automation::Ticket>,
+    guard: &mut Option<bag::BagSession>,
+) -> Result<bag::BagOutcome, String> {
     let region = region_by_locale(&target.locale).ok_or("无法识别目标地区")?;
     let product_url = target_purchase_url(app, target).ok_or("无法生成该商品的购买页地址")?;
     let bag_url = region.bag_url();
     let profile = apw_core::config::runtime_dir(BUYER_PROFILE_DIR).map_err(|e| e.to_string())?;
 
     let state = app.state::<AppState>();
-    let mut guard = state.bag.lock().await;
     let settings = state.settings_snapshot();
     if let Some(ticket) = &ticket {
         if !state.admission.lock().unwrap().valid(ticket)
@@ -911,7 +968,7 @@ async fn add_target_to_bag(
             return Err("自动加购任务已取消或过期".into());
         }
     }
-    let session = bag::ensure_session(&mut guard, &profile, &state.buyers).await?;
+    let session = bag::ensure_session(guard, &profile, &state.buyers).await?;
     // 自动加购这一步仍然不进入结账/订单页；结账由 checkout 模块在加购完成后接手。
     bag::ensure_no_checkout_pages(&profile).await?;
     // Never navigate a checkout/order page, including manual retries.
@@ -966,11 +1023,22 @@ async fn open_buyer_window(app: AppHandle) -> Result<String, String> {
     {
         let state = app.state::<AppState>();
         let mut guard = state.bag.lock().await;
-        let session = bag::ensure_session(&mut guard, &profile, &state.buyers).await?;
-        if let Some(url) = target_url.as_deref() {
-            session.navigate(url).await?;
+        // 连接在探活之后才断开（例如探活与导航之间窗口被关）时，丢掉它再试一次。
+        for attempt in 0..2 {
+            let session = bag::ensure_session(&mut guard, &profile, &state.buyers).await?;
+            let navigated = match target_url.as_deref() {
+                Some(url) => session.navigate(url).await,
+                None => Ok(()),
+            };
+            match navigated {
+                Ok(()) => {
+                    session.focus();
+                    break;
+                }
+                Err(err) if attempt == 0 && bag::connection_lost(&err) => *guard = None,
+                Err(err) => return Err(err),
+            }
         }
-        session.focus();
     }
     Ok(profile.display().to_string())
 }
@@ -1067,6 +1135,7 @@ fn watch_for_new_order(app: AppHandle) {
                         .unwrap()
                         .insert(order.clone());
                     if fresh {
+                        disarm_checkout_after_order(&app).await;
                         for attempt in 0..3 {
                             if notify_order_created(&app, &order).await {
                                 break;
@@ -1097,8 +1166,14 @@ async fn read_pending_order(app: &AppHandle) -> Result<Option<String>, String> {
     }
     let state = app.state::<AppState>();
     let mut guard = state.bag.lock().await;
-    let session = bag::ensure_session(&mut guard, &profile, &state.buyers).await?;
-    session.detect_order().await
+    for attempt in 0..2 {
+        let session = bag::ensure_session(&mut guard, &profile, &state.buyers).await?;
+        match session.detect_order().await {
+            Err(err) if attempt == 0 && bag::connection_lost(&err) => *guard = None,
+            other => return other,
+        }
+    }
+    Ok(None)
 }
 
 async fn notify_order_created(app: &AppHandle, order: &str) -> bool {
@@ -1272,6 +1347,19 @@ async fn checkout_in_buyer_window(
     target: &Target,
     place_order: bool,
 ) -> Result<CheckoutOutcome, checkout::CheckoutError> {
+    let state = app.state::<AppState>();
+    let mut guard = state.bag.lock().await;
+    checkout_in_buyer_window_locked(app, lease, target, place_order, &mut guard).await
+}
+
+/// 同上，调用方已持有买家会话锁。
+async fn checkout_in_buyer_window_locked(
+    app: &AppHandle,
+    lease: &checkout::CheckoutLease,
+    target: &Target,
+    place_order: bool,
+    guard: &mut Option<bag::BagSession>,
+) -> Result<CheckoutOutcome, checkout::CheckoutError> {
     let browser_error =
         |message: String| checkout::CheckoutError { stage: checkout::Stage::Browser, message };
     let state = app.state::<AppState>();
@@ -1279,12 +1367,11 @@ async fn checkout_in_buyer_window(
     let plan = CheckoutPlan::new(target, &settings, &state.catalog, place_order);
     let profile = apw_core::config::runtime_dir(BUYER_PROFILE_DIR)
         .map_err(|e| browser_error(e.to_string()))?;
-    let mut guard = state.bag.lock().await;
     // 订单页已经在买家窗口里时绝不重来：订单可能已经生成。
     bag::ensure_no_order_pages(&profile)
         .await
         .map_err(browser_error)?;
-    let session = bag::ensure_session(&mut guard, &profile, &state.buyers)
+    let session = bag::ensure_session(guard, &profile, &state.buyers)
         .await
         .map_err(browser_error)?;
     let progress = {
@@ -1297,6 +1384,8 @@ async fn checkout_in_buyer_window(
     let result = state.checkout.run(lease, session, &plan, &progress).await;
     if session.current_url().await.is_err() {
         // 连接已经断了（窗口被关、进程退出），下次重新接。
+        *guard = None;
+    } else if result.as_ref().is_err_and(|error| bag::connection_lost(&error.message)) {
         *guard = None;
     } else {
         session.focus();
@@ -1321,6 +1410,10 @@ async fn finish_checkout(
             match state.put_settings(next.clone()) {
                 Ok(()) => {
                     let _ = app.emit(SETTINGS_CHANNEL, &next);
+                    let _ = app.emit(
+                        NOTICE_CHANNEL,
+                        "自动结账与自动下单已关闭并保存；需要再次使用时请手动打开。",
+                    );
                 }
                 Err(err) => {
                     let _ = app.emit(NOTICE_CHANNEL, format!("关闭自动结账开关失败：{err}"));
@@ -1381,6 +1474,9 @@ async fn finish_checkout(
 }
 
 /// 到货后：（可选）先自动加购，再（可选）自动结账。
+///
+/// 两步在**同一次**持有买家会话锁期间依次执行（[`automation::chain_hit`]）：结账
+/// 只在加购完成之后开始，中间也不会被订单监听、打开窗口或试跑插进来换页面。
 async fn automate_hit(
     app: AppHandle,
     target: Target,
@@ -1388,61 +1484,96 @@ async fn automate_hit(
     ticket: Option<automation::Ticket>,
     lease: Option<checkout::CheckoutLease>,
 ) {
-    let mut bag_ready = true;
-    if let Some(ticket) = ticket {
-        let notice = match add_target_to_bag(&app, &target, Some(ticket)).await {
-            Ok(outcome) => {
-                if lease.is_none() {
-                    // 不结账时沿用原来的做法：用户接着自己结账，从这里开始盯订单。
-                    watch_for_new_order(app.clone());
-                }
+    let state = app.state::<AppState>();
+    let checkout_wanted = lease.is_some() && actions.checkout;
+    // 这件商品本次运行里已经加购过（去重）：不再重复加，由结账在购物袋页逐项核对。
+    let already_attempted = ticket.is_none()
+        && actions.add_to_bag
+        && state
+            .admission
+            .lock()
+            .unwrap()
+            .attempted(&target.locale, &target.part_number);
+    let add = ticket.map(|ticket| {
+        let (app, target) = (&app, &target);
+        async move |guard: &mut Option<bag::BagSession>| {
+            add_target_to_bag_locked(app, target, Some(ticket), guard).await
+        }
+    });
+    let run_checkout = (checkout_wanted && lease.is_some()).then(|| {
+        let (app, target, lease) = (&app, &target, lease.as_ref());
+        async move |guard: &mut Option<bag::BagSession>, step: &automation::BagStep| {
+            let lease = lease.expect("checkout lease");
+            let state = app.state::<AppState>();
+            let settings = state.settings_snapshot();
+            // 加购期间用户可能暂停了监控、关掉了自动结账或改了要下单的商品。
+            if !settings.checkout.enabled
+                || !settings.is_checkout_target(target)
+                || !state.automation_active().await
+                || state.exit_barrier.is_exiting()
+            {
+                return Err("自动结账已取消：设置或监控状态已变化。".to_string());
+            }
+            if !settings.has_pickup_id_suffix() {
+                return Err(
+                    "自动结账未执行：还没有在「取货信息」里填写完整的证件号码后四位。".to_string(),
+                );
+            }
+            if *step == automation::BagStep::AlreadyAttempted {
+                let _ = app.emit(
+                    NOTICE_CHANNEL,
+                    "这件商品本次已自动加购过，不再重复加购；自动结账会先核对购物袋里恰好是它。",
+                );
+            }
+            Ok(checkout_in_buyer_window_locked(
+                app,
+                lease,
+                target,
+                settings.checkout.place_order,
+                guard,
+            )
+            .await)
+        }
+    });
+    let (step, checkout_result, added) =
+        automation::chain_hit(&state.bag, add, already_attempted, run_checkout).await;
+
+    match (&step, added) {
+        (automation::BagStep::Added, Some(outcome)) => {
+            if !checkout_wanted {
+                // 不结账时沿用原来的做法：用户接着自己结账，从这里开始盯订单。
+                watch_for_new_order(app.clone());
+            }
+            let _ = app.emit(
+                NOTICE_CHANNEL,
                 format!(
                     "自动加购完成：{} {}（{}）",
                     target.store_title, target.product_name, outcome.summary
-                )
-            }
-            Err(err) => {
-                bag_ready = false;
+                ),
+            );
+        }
+        (automation::BagStep::Failed(err), _) => {
+            let _ = app.emit(
+                NOTICE_CHANNEL,
                 format!(
                     "自动加购失败：{} {} —— {err}",
                     target.store_title, target.product_name
-                )
+                ),
+            );
+            if checkout_wanted {
+                let _ = app.emit(NOTICE_CHANNEL, "自动结账未执行：本次自动加购没有完成。");
             }
-        };
-        let _ = app.emit(NOTICE_CHANNEL, notice);
+        }
+        _ => {}
     }
-    let Some(lease) = lease else {
-        return;
-    };
-    if !actions.checkout {
-        return;
-    }
-    if !bag_ready {
-        let _ = app.emit(NOTICE_CHANNEL, "自动结账未执行：本次自动加购没有完成。");
-        return;
-    }
-    let state = app.state::<AppState>();
-    let settings = state.settings_snapshot();
-    // 加购期间用户可能暂停了监控、关掉了自动结账或改了要下单的商品。
-    if !settings.checkout.enabled
-        || !settings.is_checkout_target(&target)
-        || !state.automation_active().await
-        || state.exit_barrier.is_exiting()
-    {
-        let _ = app.emit(NOTICE_CHANNEL, "自动结账已取消：设置或监控状态已变化。");
-        return;
-    }
-    if !settings.has_pickup_id_suffix() {
-        let _ = app.emit(
-            NOTICE_CHANNEL,
-            "自动结账未执行：还没有在「取货信息」里填写完整的证件号码后四位。",
-        );
-        return;
-    }
-    let result =
-        checkout_in_buyer_window(&app, &lease, &target, settings.checkout.place_order).await;
     drop(lease);
-    finish_checkout(&app, &target, result).await;
+    match checkout_result {
+        Some(Ok(result)) => finish_checkout(&app, &target, result).await,
+        Some(Err(notice)) => {
+            let _ = app.emit(NOTICE_CHANNEL, notice);
+        }
+        None => {}
+    }
 }
 
 /// 试跑自动结账，走到「查看订单」页为止，无论设置如何都不提交订单。
@@ -1569,7 +1700,16 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
                         .lock()
                         .unwrap()
                         .is_pending(&target.locale, &target.part_number);
-                let lease = if bag_in_flight { None } else { lease };
+                // 要求加购却既没受理、也没加购过（例如受理名额已满）：不能结账，
+                // 否则结账会在加购之前、对着一个不确定的购物袋开始。
+                let bag_unknown = hit_actions.add_to_bag
+                    && ticket.is_none()
+                    && !state
+                        .admission
+                        .lock()
+                        .unwrap()
+                        .attempted(&target.locale, &target.part_number);
+                let lease = if bag_in_flight || bag_unknown { None } else { lease };
                 if ticket.is_some() || lease.is_some() {
                     // 加购和结账要等页面加载、走完整段流程，放进后台任务，
                     // 不能堵住事件泵。
@@ -1887,6 +2027,7 @@ pub fn run() {
             refresh_products,
             get_settings,
             save_settings,
+            set_checkout_switches,
             test_clash_route,
             list_clash_nodes,
             select_clash_node,

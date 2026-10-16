@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { saveSettings, testCheckout } from "@/lib/store";
+import { saveSettings, setCheckoutSwitches, testCheckout } from "@/lib/store";
 import { INSTALLMENT_PERIODS, type CheckoutPayment, type CheckoutSettings as Checkout, type Target } from "@/lib/types";
 
 const PAYMENT_LABELS: Record<CheckoutPayment, string> = {
@@ -83,14 +83,14 @@ export function CheckoutSettings({
             aria-label="到货后自动结账"
             checked={checkout.enabled}
             disabled={(!suffixReady || !chosen) && !checkout.enabled}
-            onCheckedChange={(enabled) => save({ enabled })}
+            onCheckedChange={(enabled) => void setCheckoutSwitches({ enabled })}
           />
         </div>
         <p className="text-[11px] leading-4 break-words text-muted-foreground">
           {autoAddToBag
             ? "到货后先在买家窗口自动加购，再从购物袋开始结账。购物袋里必须只有这一件商品、数量为 1。"
             : "未开启自动加购：到货后直接从买家窗口的购物袋开始结账，请提前把这件商品放进购物袋。"}
-          成功执行一次后会自动关闭，需要时再手动开启。付款始终由你自己完成。
+          成功执行一次（或检测到新订单）后会连同「自动点立即下单」一起关闭并保存，需要时再手动开启。付款始终由你自己完成。
         </p>
         {!suffixReady ? (
           <p role="alert" className="text-[11px] leading-4 break-words text-destructive">
@@ -202,7 +202,7 @@ export function CheckoutSettings({
             id="checkout-place-order"
             aria-label="核对通过后自动点立即下单"
             checked={checkout.placeOrder}
-            onCheckedChange={(placeOrder) => save({ placeOrder })}
+            onCheckedChange={(placeOrder) => void setCheckoutSwitches({ placeOrder })}
           />
         </div>
         <p className="text-[11px] leading-4 break-words text-muted-foreground">

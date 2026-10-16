@@ -354,6 +354,28 @@ export function saveSettings(patch: Partial<Settings>): Promise<boolean> {
   });
 }
 
+/**
+ * 切换「到货后自动结账」与「自动点立即下单」。
+ *
+ * 这两个开关只走专门的命令：后端在下单后会自己关掉它们，整份保存设置时以后端
+ * 为准，界面上可能过时的那份不能把它们重新打开。
+ */
+export function setCheckoutSwitches(patch: { enabled?: boolean; placeOrder?: boolean }): Promise<boolean> {
+  return enqueueSettingsWrite(async () => {
+    try {
+      const saved = await invoke<Settings>("set_checkout_switches", {
+        enabled: patch.enabled,
+        placeOrder: patch.placeOrder,
+      });
+      update({ settings: saved });
+      return true;
+    } catch (err) {
+      pushLog(`保存自动结账开关失败：${String(err)}`);
+      return false;
+    }
+  });
+}
+
 export function setCategory(category: Category): void {
   update({ category });
 }
