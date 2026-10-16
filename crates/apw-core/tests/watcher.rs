@@ -1204,3 +1204,69 @@ async fn strict_interval_is_exact_even_on_failure_with_default_jitter() {
         watcher.stop().await;
     }
 }
+
+/// 两轮之间收到的普通命令（界面刷新、读快照、改列表、改间隔）只能被处理，
+/// 不能把等待提前结束。到货那一刻界面会频繁读快照，旧实现每读一次就立刻
+/// 开下一轮，现场 2 秒内连查两次并撞上 541。
+#[tokio::test]
+async fn 两轮之间的普通命令不会提前开始下一轮() {
+    let fake =
+        FakeFetcher::new(|_, store, parts| Ok(ok_response(store, parts, Availability::OutOfStock)));
+    let config = WatcherConfig {
+        interval: Duration::from_millis(400),
+        jitter: 0.0,
+        ..fast_config()
+    };
+    let (watcher, mut rx) = Watcher::spawn(fake.clone(), config);
+    watcher.set_targets(vec![target("R683", "MG724CH/A")]).await;
+    watcher.start().await;
+    wait_cycle(&mut rx).await;
+    let after_first = fake.call_count();
+
+    for _ in 0..5 {
+        let _ = watcher.snapshot().await;
+        let _ = watcher.is_running().await;
+        watcher.set_targets(vec![target("R683", "MG724CH/A")]).await;
+        watcher.set_interval(Duration::from_millis(400)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        fake.call_count(),
+        after_first,
+        "间隔未到时，普通命令不应触发新的查询"
+    );
+
+    tokio::time::timeout(Duration::from_secs(2), wait_cycle(&mut rx))
+        .await
+        .expect("间隔到了应照常查询下一轮");
+    assert_eq!(fake.call_count(), after_first + 1);
+    watcher.stop().await;
+}
+
+/// 用户在两轮之间点「立即重试」时仍要马上查询，不受上面的修复影响。
+#[tokio::test]
+async fn 两轮之间点立即重试仍会马上查询() {
+    let fake =
+        FakeFetcher::new(|_, store, parts| Ok(ok_response(store, parts, Availability::OutOfStock)));
+    let config = WatcherConfig {
+        interval: Duration::from_secs(30),
+        jitter: 0.0,
+        ..fast_config()
+    };
+    let (watcher, mut rx) = Watcher::spawn(fake.clone(), config);
+    watcher.set_targets(vec![target("R683", "MG724CH/A")]).await;
+    watcher.start().await;
+    wait_cycle(&mut rx).await;
+    let after_first = fake.call_count();
+
+    let _ = watcher.snapshot().await;
+    assert!(watcher.retry_now().await);
+    tokio::time::timeout(Duration::from_millis(500), wait_cycle(&mut rx))
+        .await
+        .expect("立即重试应马上开始下一轮");
+    assert_eq!(fake.call_count(), after_first + 1);
+
+    watcher.stop().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(fake.call_count(), after_first + 1, "暂停后不应再查询");
+}

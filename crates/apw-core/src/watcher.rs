@@ -721,12 +721,27 @@ impl<F: Fetcher> Engine<F> {
                 continue;
             }
 
-            tokio::select! {
-                () = tokio::time::sleep(delay) => {}
-                maybe = cmd_rx.recv() => match maybe {
-                    Some(cmd) => self.handle_command(cmd).await,
-                    None => return,
-                },
+            // 等满本轮间隔。期间收到的普通命令（界面读快照、改列表、改间隔）只处理、
+            // 不提前开下一轮：到货时界面会连着刷新，旧实现每来一条命令就立刻重查，
+            // 现场两秒内连查两次撞上 541。只有用户的「立即重试」和启停才结束等待。
+            let wake_at = tokio::time::Instant::now() + delay;
+            loop {
+                tokio::select! {
+                    () = tokio::time::sleep_until(wake_at) => break,
+                    maybe = cmd_rx.recv() => match maybe {
+                        Some(cmd) => {
+                            let wakes = matches!(
+                                cmd,
+                                Command::RetryNow(_) | Command::Stop(_) | Command::Start(_)
+                            );
+                            self.handle_command(cmd).await;
+                            if wakes || !self.running {
+                                break;
+                            }
+                        }
+                        None => return,
+                    },
+                }
             }
         }
     }
