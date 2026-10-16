@@ -554,10 +554,27 @@ impl Catalog {
 
     /// 按门店编号查门店，语义同 [`Catalog::product_by_part`]。
     pub fn store_by_number(&self, locale: &str, number: &str) -> Option<Store> {
-        self.stores(locale)
+        let mut store = self
+            .stores(locale)
             .ok()?
             .into_iter()
-            .find(|s| s.number == number)
+            .find(|s| s.number == number)?;
+        // 旧版缓存没有街道地址，只为同一编号、同一省市的门店补上内置公开地址。
+        if store.address.is_empty()
+            && let Some(offline) = self
+                .offline_stores
+                .as_ref()
+                .ok()
+                .and_then(|regions| regions.get(locale))
+                .and_then(|stores| {
+                    stores.iter().find(|old| {
+                        old.number == number && old.state == store.state && old.city == store.city
+                    })
+                })
+        {
+            store.address.clone_from(&offline.address);
+        }
+        Some(store)
     }
 
     /// 从 Apple 官网购买页抓最新型号，覆盖该地区的内存副本。返回抓到的型号数。
@@ -826,6 +843,8 @@ struct RawStore {
 #[serde(rename_all = "camelCase")]
 struct RawAddress {
     #[serde(default)]
+    address1: String,
+    #[serde(default)]
     city: String,
     #[serde(default)]
     state_name: String,
@@ -935,6 +954,8 @@ struct CachedStore {
     state: String,
     #[serde(default)]
     postal_code: String,
+    #[serde(default)]
+    address: String,
 }
 
 impl CachedStore {
@@ -946,6 +967,7 @@ impl CachedStore {
             city: store.city.clone(),
             state: store.state.clone(),
             postal_code: store.postal_code.clone(),
+            address: store.address.clone(),
         }
     }
 
@@ -957,6 +979,7 @@ impl CachedStore {
             city: self.city,
             state: self.state,
             postal_code: self.postal_code,
+            address: self.address,
         }
     }
 }
@@ -1052,6 +1075,7 @@ fn push_store(
         city: address_city.to_string(),
         state: state.to_string(),
         postal_code: raw.address.postal_code.trim().to_string(),
+        address: raw.address.address1.trim().to_string(),
     });
 }
 
@@ -1061,6 +1085,22 @@ mod tests {
     use crate::model::REGIONS;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn 旧门店缓存可从内置同城门店补齐结账所需地址() {
+        let catalog = Catalog::new();
+        let original = catalog.store_by_number("zh_CN", "R577").unwrap();
+        let mut cached = CachedStore::from_store(&original);
+        let mut old_json = serde_json::to_value(&cached).unwrap();
+        old_json.as_object_mut().unwrap().remove("address");
+        cached = serde_json::from_value(old_json).unwrap();
+        assert!(cached.address.is_empty());
+        write_lock(&catalog.online_stores).insert("zh_CN".into(), vec![cached.into_store()]);
+        let restored = catalog.store_by_number("zh_CN", "R577").unwrap();
+        assert_eq!(restored.address, original.address);
+        let round_trip = CachedStore::from_store(&restored).into_store();
+        assert_eq!(round_trip.address, original.address);
+    }
 
     const IPHONE_17: Family<'static> = Family {
         category: Category::Iphone,

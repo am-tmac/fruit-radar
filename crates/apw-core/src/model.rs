@@ -519,15 +519,18 @@ pub struct Store {
     pub name: String,
     /// 界面展示名，如「上海-环球港」。
     pub title: String,
-    /// 只用于拼取货接口的 `location` 参数，不暴露给前端。
+    /// 取货查询和结账地区选择使用，不暴露给前端。
     #[serde(skip)]
     pub city: String,
-    /// 只用于拼取货接口的 `location` 参数，不暴露给前端。
+    /// 取货查询和结账地区选择使用，不暴露给前端。
     #[serde(skip)]
     pub state: String,
     /// 日本等站点优先使用邮编查询附近门店。
     #[serde(skip)]
     pub postal_code: String,
+    /// 门店公开地址，用于结账地区选择器匹配门店所在区县。
+    #[serde(skip)]
+    pub address: String,
 }
 
 impl Store {

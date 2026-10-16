@@ -164,8 +164,11 @@ fn 跨边界的结构统一用小驼峰() {
         city: "上海".into(),
         state: "上海".into(),
         postal_code: "200062".into(),
+        address: "上海市普陀区中山北路 3300 号".into(),
     };
-    assert!(to_value(&store).get("number").is_some());
+    let value = to_value(&store);
+    assert!(value.get("number").is_some());
+    assert!(value.get("address").is_none());
 }
 
 #[test]

@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use apw_core::catalog::Catalog;
 use apw_core::config::{CheckoutPayment, Settings, checkout_product_key, normalized_id_suffix};
 use apw_core::model::Target;
 use serde::Deserialize;
@@ -126,6 +127,8 @@ pub struct CheckoutPlan {
     pub store_number: String,
     pub store_title: String,
     pub product_name: String,
+    /// 从目标门店目录读取，不沿用送货地址或浏览器记住的其他城市。
+    pub pickup_region: Option<PickupRegion>,
     pub national_id_suffix: String,
     pub payment: CheckoutPayment,
     pub installment_bank: String,
@@ -138,10 +141,31 @@ pub struct CheckoutPlan {
     pub contact: Vec<(&'static str, String)>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PickupRegion {
+    state: String,
+    city: String,
+    address: String,
+}
+
+impl PickupRegion {
+    fn for_store(catalog: &Catalog, locale: &str, number: &str) -> Option<Self> {
+        let store = catalog.store_by_number(locale, number)?;
+        if locale != "zh_CN" || store.state.is_empty() || store.city.is_empty() {
+            return None;
+        }
+        Some(Self {
+            state: store.state,
+            city: store.city,
+            address: store.address,
+        })
+    }
+}
+
 impl CheckoutPlan {
     /// 取货联系人来自设置顶层的 `pickup*`（与「取货信息」面板同一份）。留空的项
     /// 不填，沿用页面上已有的值；最后仍会核对四项都不为空。
-    pub fn new(target: &Target, all: &Settings, place_order: bool) -> Self {
+    pub fn new(target: &Target, all: &Settings, catalog: &Catalog, place_order: bool) -> Self {
         let settings = &all.checkout;
         let monitored_stores = all
             .targets
@@ -168,6 +192,7 @@ impl CheckoutPlan {
             store_number: target.store_number.clone(),
             store_title: target.store_title.clone(),
             product_name: target.product_name.clone(),
+            pickup_region: PickupRegion::for_store(catalog, &target.locale, &target.store_number),
             national_id_suffix: normalized_id_suffix(&all.pickup_id_last4),
             payment: settings.payment,
             installment_bank: settings.installment_bank.clone(),
@@ -184,6 +209,25 @@ fn mainland_phone(raw: &str) -> String {
         Some(rest) if rest.len() == 11 => rest.to_string(),
         _ => digits,
     }
+}
+
+fn pickup_region_js(plan: &CheckoutPlan) -> String {
+    format!(
+        "JSON.stringify(({})({}))",
+        include_str!("checkout_pickup_region.js"),
+        json!({
+            "store": plan.store_number,
+            "region": plan.pickup_region,
+            "acceptNearest": plan.accept_nearest_store,
+            "monitoredStores": plan.monitored_stores,
+        })
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct PickupRegionState {
+    ready: bool,
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -689,6 +733,7 @@ impl<P: CdpPage> Flow<'_, P> {
         )
         .await?;
 
+        self.prepare_pickup_region().await?;
         let mut script = store_state_js(&self.plan.store_number);
         self.wait(
             stage,
@@ -832,6 +877,24 @@ impl<P: CdpPage> Flow<'_, P> {
         )
         .await?;
         self.wait_for_step(stage, "PickupContact").await
+    }
+
+    /// 列表为空时可能是官网还没选地区，必须先完成目标门店所在省市区的选择。
+    async fn prepare_pickup_region(&mut self) -> Result<(), CheckoutError> {
+        let script = pickup_region_js(self.plan);
+        let state: PickupRegionState = self
+            .wait(
+                Stage::Fulfillment,
+                &script,
+                NAVIGATION_TIMEOUT,
+                "目标门店的取货地区选择完成",
+                |state: &PickupRegionState| state.ready || state.error.is_some(),
+            )
+            .await?;
+        if let Some(error) = state.error {
+            return Err(CheckoutError::new(Stage::Fulfillment, error));
+        }
+        Ok(())
     }
 
     /// 等门店页稳定：连续一段时间读到的状态完全相同。
@@ -1367,6 +1430,28 @@ pub fn settings_after_checkout(
 mod tests {
     use super::*;
 
+    #[test]
+    fn 结账地区按目标门店编号从目录读取() {
+        let catalog = Catalog::new();
+        assert_eq!(
+            PickupRegion::for_store(&catalog, "zh_CN", "R577"),
+            Some(PickupRegion {
+                state: "广东".into(),
+                city: "广州".into(),
+                address: "广州市天河区天河路 218 号".into(),
+            })
+        );
+        assert_eq!(
+            PickupRegion::for_store(&catalog, "zh_CN", "R683"),
+            Some(PickupRegion {
+                state: "上海".into(),
+                city: "上海".into(),
+                address: "上海市普陀区中山北路 3300 号".into(),
+            })
+        );
+        assert_eq!(PickupRegion::for_store(&catalog, "zh_CN", "R000"), None);
+    }
+
     fn item(name: &str, quantity: &str) -> LineItem {
         LineItem {
             name: name.into(),
@@ -1428,6 +1513,7 @@ mod tests {
             store_number: "R678".into(),
             store_title: "Apple 静安".into(),
             product_name: "x".into(),
+            pickup_region: None,
             national_id_suffix: "123X".into(),
             payment: CheckoutPayment::Installment,
             installment_bank: "招商'银行".into(),
@@ -1453,13 +1539,14 @@ mod tests {
         step: &'static str,
         items: Vec<(&'static str, &'static str)>,
         store_checked: bool,
+        region_error: Option<&'static str>,
         clicks: Vec<String>,
         scripts: Vec<String>,
     }
 
     impl FakePage {
         fn new(items: Vec<(&'static str, &'static str)>) -> Self {
-            Self { step: "", items, store_checked: true, clicks: Vec::new(), scripts: Vec::new() }
+            Self { step: "", items, store_checked: true, region_error: None, clicks: Vec::new(), scripts: Vec::new() }
         }
         fn clicked(&self, needle: &str) -> usize {
             self.clicks.iter().filter(|c| c.contains(needle)).count()
@@ -1479,6 +1566,9 @@ mod tests {
         }
         async fn evaluate(&mut self, script: &str, _await: bool) -> Result<Value, String> {
             self.scripts.push(script.to_string());
+            if script.contains("window.__apwPickupRegion") {
+                return Ok(js(json!({"ready": self.region_error.is_none(), "error": self.region_error})));
+            }
             if script.contains("if (!e || e.disabled) return false;") {
                 self.clicks.push(script.to_string());
                 if script.contains(r#"data-autom=\"checkout\""#) && self.step == "Bag" {
@@ -1571,7 +1661,7 @@ mod tests {
     #[test]
     fn 计划里的联系人来自取货信息且只有一份来源() {
         let (target, settings) = fixture_settings(false);
-        let plan = CheckoutPlan::new(&target, &settings, false);
+        let plan = CheckoutPlan::new(&target, &settings, &Catalog::new(), false);
         assert_eq!(plan.national_id_suffix, "000X");
         assert_eq!(
             plan.contact,
@@ -1586,9 +1676,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn 地区无法唯一匹配时停在门店页且不继续付款或下单() {
+        let (target, settings) = fixture_settings(true);
+        let plan = CheckoutPlan::new(&target, &settings, &Catalog::new(), true);
+        let runner = CheckoutRunner::new();
+        let lease = runner.try_begin().unwrap();
+        let mut page = FakePage::new(vec![("测试商品 256GB", "1")]);
+        page.region_error = Some("无法在取货地区中唯一确定区县，请手动选择");
+        let result = runner.run(&lease, &mut page, &plan, &|_| {}).await;
+        let error = result.as_ref().unwrap_err();
+        assert_eq!(error.stage, Stage::Fulfillment);
+        assert!(error.message.contains("唯一确定区县"));
+        assert_eq!(page.clicked("fulfillment-continue-button"), 0);
+        assert_eq!(page.clicked("continue-button-placeOrder"), 0);
+        assert!(!page.scripts.iter().any(|s| s.contains("searchPending")));
+        assert!(settings_after_checkout(&settings, &result).is_none());
+    }
+
+    #[tokio::test]
     async fn 默认停在查看订单页且不点立即下单() {
         let (target, settings) = fixture_settings(false);
-        let plan = CheckoutPlan::new(&target, &settings, settings.checkout.place_order);
+        let plan = CheckoutPlan::new(&target, &settings, &Catalog::new(), settings.checkout.place_order);
         let runner = CheckoutRunner::new();
         let lease = runner.try_begin().unwrap();
         let mut page = FakePage::new(vec![("测试商品 256GB", "1")]);
@@ -1606,7 +1714,7 @@ mod tests {
     #[tokio::test]
     async fn 开启自动下单时只点一次立即下单_成功后关闭开关() {
         let (target, settings) = fixture_settings(true);
-        let plan = CheckoutPlan::new(&target, &settings, settings.checkout.place_order);
+        let plan = CheckoutPlan::new(&target, &settings, &Catalog::new(), settings.checkout.place_order);
         let runner = CheckoutRunner::new();
         let lease = runner.try_begin().unwrap();
         let mut page = FakePage::new(vec![("测试商品 256GB", "1")]);
@@ -1628,7 +1736,7 @@ mod tests {
     #[tokio::test]
     async fn 购物袋不是恰好一件到货商品时在购物袋页停下且不点结账() {
         let (target, settings) = fixture_settings(true);
-        let plan = CheckoutPlan::new(&target, &settings, true);
+        let plan = CheckoutPlan::new(&target, &settings, &Catalog::new(), true);
         let runner = CheckoutRunner::new();
         let lease = runner.try_begin().unwrap();
         let mut page = FakePage::new(vec![("测试商品 256GB", "1"), ("别的商品", "1")]);
@@ -1710,7 +1818,7 @@ mod tests {
     #[tokio::test]
     async fn 退出叫停后不再开始_进行中的流程立即中止() {
         let (target, settings) = fixture_settings(false);
-        let plan = CheckoutPlan::new(&target, &settings, false);
+        let plan = CheckoutPlan::new(&target, &settings, &Catalog::new(), false);
         let runner = CheckoutRunner::new();
         let lease = runner.try_begin().unwrap();
         runner.cancel();
@@ -1727,7 +1835,7 @@ mod tests {
     fn 缺证件后四位时拒绝开始() {
         let (target, mut settings) = fixture_settings(false);
         settings.pickup_id_last4 = "12".into();
-        let plan = CheckoutPlan::new(&target, &settings, false);
+        let plan = CheckoutPlan::new(&target, &settings, &Catalog::new(), false);
         let runner = CheckoutRunner::new();
         let lease = runner.try_begin().unwrap();
         let mut page = FakePage::new(vec![("测试商品 256GB", "1")]);

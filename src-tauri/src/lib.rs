@@ -1276,7 +1276,7 @@ async fn checkout_in_buyer_window(
         |message: String| checkout::CheckoutError { stage: checkout::Stage::Browser, message };
     let state = app.state::<AppState>();
     let settings = state.settings_snapshot();
-    let plan = CheckoutPlan::new(target, &settings, place_order);
+    let plan = CheckoutPlan::new(target, &settings, &state.catalog, place_order);
     let profile = apw_core::config::runtime_dir(BUYER_PROFILE_DIR)
         .map_err(|e| browser_error(e.to_string()))?;
     let mut guard = state.bag.lock().await;
