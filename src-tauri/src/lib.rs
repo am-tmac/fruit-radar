@@ -955,18 +955,17 @@ async fn add_target_to_bag_locked(
 
     let state = app.state::<AppState>();
     let settings = state.settings_snapshot();
-    if let Some(ticket) = &ticket {
-        if !state.admission.lock().unwrap().valid(ticket)
+    if let Some(ticket) = &ticket
+        && (!state.admission.lock().unwrap().valid(ticket)
             || !settings.auto_add_to_bag
             || !settings.targets.iter().any(|t| {
                 t.locale == target.locale
                     && t.part_number == target.part_number
                     && t.store_number == target.store_number
             })
-            || !state.automation_active().await
-        {
-            return Err("自动加购任务已取消或过期".into());
-        }
+            || !state.automation_active().await)
+    {
+        return Err("自动加购任务已取消或过期".into());
     }
     let session = bag::ensure_session(guard, &profile, &state.buyers).await?;
     // 自动加购这一步仍然不进入结账/订单页；结账由 checkout 模块在加购完成后接手。
@@ -980,18 +979,17 @@ async fn add_target_to_bag_locked(
     // cancellation or an uncertain CDP result must continue to deduplicate.
     let control = state.control.lock().await;
     let settings = state.settings_snapshot();
-    if let Some(ticket) = &ticket {
-        if !settings.auto_add_to_bag
+    if let Some(ticket) = &ticket
+        && (!settings.auto_add_to_bag
             || !settings.targets.iter().any(|t| {
                 t.locale == target.locale
                     && t.part_number == target.part_number
                     && t.store_number == target.store_number
             })
             || !state.automation_active().await
-            || !state.admission.lock().unwrap().commit(ticket)
-        {
-            return Err("自动加购任务已取消或过期".into());
-        }
+            || !state.admission.lock().unwrap().commit(ticket))
+    {
+        return Err("自动加购任务已取消或过期".into());
     }
     drop(control);
     let result = session
@@ -1367,8 +1365,10 @@ async fn checkout_in_buyer_window_locked(
     place_order: bool,
     guard: &mut Option<bag::BagSession>,
 ) -> Result<CheckoutOutcome, checkout::CheckoutError> {
-    let browser_error =
-        |message: String| checkout::CheckoutError { stage: checkout::Stage::Browser, message };
+    let browser_error = |message: String| checkout::CheckoutError {
+        stage: checkout::Stage::Browser,
+        message,
+    };
     let state = app.state::<AppState>();
     let settings = state.settings_snapshot();
     let plan = CheckoutPlan::new(target, &settings, &state.catalog, place_order);
@@ -1385,14 +1385,20 @@ async fn checkout_in_buyer_window_locked(
         let app = app.clone();
         let settings = settings.clone();
         move |message: String| {
-            let _ = app.emit(NOTICE_CHANNEL, checkout::redact_contact(&message, &settings));
+            let _ = app.emit(
+                NOTICE_CHANNEL,
+                checkout::redact_contact(&message, &settings),
+            );
         }
     };
     let result = state.checkout.run(lease, session, &plan, &progress).await;
     if session.current_url().await.is_err() {
         // 连接已经断了（窗口被关、进程退出），下次重新接。
         *guard = None;
-    } else if result.as_ref().is_err_and(|error| bag::connection_lost(&error.message)) {
+    } else if result
+        .as_ref()
+        .is_err_and(|error| bag::connection_lost(&error.message))
+    {
         *guard = None;
     } else {
         session.focus();
@@ -1600,10 +1606,7 @@ async fn test_checkout(app: AppHandle) -> Result<String, String> {
         .find(|target| settings.is_checkout_target(target))
         .cloned()
         .ok_or("试跑需要先确定要下单的商品：监控列表里要有它的中国大陆监控项，有多件商品时请在自动结账里选一件")?;
-    let lease = state
-        .checkout
-        .try_begin()
-        .ok_or("已有一次结账正在进行")?;
+    let lease = state.checkout.try_begin().ok_or("已有一次结账正在进行")?;
     match checkout_in_buyer_window(&app, &lease, &target, false).await {
         Ok(CheckoutOutcome::ReachedReview { store, total }) => Ok(format!(
             "试跑完成：{store} {} 已到「查看订单」页（总计 {total}），没有提交订单。",
@@ -1638,7 +1641,10 @@ async fn pause_after_hit(
 ///
 /// 不等买家会话锁：结账或加购可能正占着它等页面，退出不能被它卡住。进程被回收后
 /// 那条 DevTools 连接随之断开，流程会在下一次读页面时停下。
-async fn shutdown_automation(checkout: &CheckoutRunner, buyers: &std::sync::Arc<bag::BuyerRegistry>) {
+async fn shutdown_automation(
+    checkout: &CheckoutRunner,
+    buyers: &std::sync::Arc<bag::BuyerRegistry>,
+) {
     checkout.cancel();
     let buyers = buyers.clone();
     let _ = tauri::async_runtime::spawn_blocking(move || buyers.close_and_terminate()).await;
@@ -1690,7 +1696,11 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
             if settings.auto_add_to_bag || hit_actions.checkout {
                 let state = app.state::<AppState>();
                 // 结账租约在派发前拿：同一轮同一商品多家门店到货时只跑一次结账。
-                let lease = if hit_actions.checkout { state.checkout.try_begin() } else { None };
+                let lease = if hit_actions.checkout {
+                    state.checkout.try_begin()
+                } else {
+                    None
+                };
                 let ticket = if hit_actions.add_to_bag {
                     state
                         .admission
@@ -1717,7 +1727,11 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
                         .lock()
                         .unwrap()
                         .attempted(&target.locale, &target.part_number);
-                let lease = if bag_in_flight || bag_unknown { None } else { lease };
+                let lease = if bag_in_flight || bag_unknown {
+                    None
+                } else {
+                    lease
+                };
                 if hit_actions.checkout {
                     checkout_action = Some(checkout_action_text(
                         lease.is_some(),
@@ -1933,7 +1947,9 @@ pub fn run() {
     tauri::Builder::default()
         // 第二次打开应用时不再起一个新实例（两个实例会抢查询资料目录的锁），
         // 而是把已有的窗口带到前台。必须最先注册。
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| reveal_window(app)))
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            reveal_window(app)
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
@@ -2109,6 +2125,18 @@ pub fn run() {
         });
 }
 
+fn checkout_action_text(leased: bool, bag_in_flight: bool, bag_unknown: bool) -> &'static str {
+    if leased {
+        "自动结账（结果单独报告）"
+    } else if bag_in_flight {
+        "由正在进行的加购任务接着结账"
+    } else if bag_unknown {
+        "加购未受理，本次跳过自动结账"
+    } else {
+        "已有结账在进行，本次跳过自动结账"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -2252,7 +2280,10 @@ mod tests {
 
         let (watcher, mut events) = Watcher::spawn(
             InStockFetcher,
-            WatcherConfig { interval: Duration::from_secs(3600), ..Default::default() },
+            WatcherConfig {
+                interval: Duration::from_secs(3600),
+                ..Default::default()
+            },
         );
         watcher.set_targets(settings.targets.clone()).await;
         watcher.start().await;
@@ -2275,7 +2306,10 @@ mod tests {
         assert!(watcher.is_running().await);
         assert!(super::pause_after_hit(&watcher, &control, &auto_paused, &barrier).await);
         assert!(!watcher.is_running().await, "到货一轮后应当暂停");
-        assert!(auto_paused.load(Ordering::Acquire), "本轮已受理的自动化仍可继续");
+        assert!(
+            auto_paused.load(Ordering::Acquire),
+            "本轮已受理的自动化仍可继续"
+        );
         // 已暂停时重复触发不做任何事。
         assert!(!super::pause_after_hit(&watcher, &control, &auto_paused, &barrier).await);
 
@@ -2334,21 +2368,13 @@ mod tests {
         assert!(buyers.is_closed());
         let late = Command::new("sleep").arg("60").spawn().unwrap();
         let late_pid = late.id() as i32;
-        assert!(buyers.register(super::bag::BuyerProcess::for_test(late)).is_err());
+        assert!(
+            buyers
+                .register(super::bag::BuyerProcess::for_test(late))
+                .is_err()
+        );
         assert_eq!(unsafe { libc::kill(late_pid, 0) }, -1);
         drop(held);
         drop(lease);
-    }
-}
-
-fn checkout_action_text(leased: bool, bag_in_flight: bool, bag_unknown: bool) -> &'static str {
-    if leased {
-        "自动结账（结果单独报告）"
-    } else if bag_in_flight {
-        "由正在进行的加购任务接着结账"
-    } else if bag_unknown {
-        "加购未受理，本次跳过自动结账"
-    } else {
-        "已有结账在进行，本次跳过自动结账"
     }
 }

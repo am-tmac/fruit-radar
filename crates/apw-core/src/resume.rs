@@ -47,7 +47,11 @@ mod tests {
         std::thread::scope(|scope| {
             for i in 0..16 {
                 let path = &path;
-                scope.spawn(move || { for _ in 0..50 { write(path, i % 2 == 0).unwrap(); } });
+                scope.spawn(move || {
+                    for _ in 0..50 {
+                        write(path, i % 2 == 0).unwrap();
+                    }
+                });
             }
         });
         let text = std::fs::read_to_string(&path).unwrap();
@@ -93,7 +97,12 @@ mod tests {
         assert!(path.exists());
         // 临时文件必须被改名带走，否则每次启动都会多留下一坨残渣。
         assert!(!path.with_extension("tmp").exists());
-        assert_eq!(std::fs::read_dir(dir.path().join("nested")).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("nested"))
+                .unwrap()
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -102,7 +111,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("no-such-dir/readonly/monitoring.state");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let mut perms = std::fs::metadata(path.parent().unwrap()).unwrap().permissions();
+        let mut perms = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions();
         perms.set_readonly(true);
         std::fs::set_permissions(path.parent().unwrap(), perms).unwrap();
         if std::fs::write(path.parent().unwrap().join("probe"), "x").is_ok() {

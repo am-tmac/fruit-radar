@@ -52,8 +52,7 @@ const CLICK_ATTEMPTS: usize = 3;
 const CLICK_CONFIRM_TIMEOUT: Duration = Duration::from_secs(15);
 /// 判定「已经离开商品页初始状态」：加购成功会走到 `step=attach`，
 /// 有的流程则直接进购物袋。比找页面上的「购物袋」字样可靠。
-const LEFT_PRODUCT_PAGE_EXPR: &str =
-    r#"location.href.includes("step=attach") || location.href.includes("shop/bag") || location.href.includes("step=")"#;
+const LEFT_PRODUCT_PAGE_EXPR: &str = r#"location.href.includes("step=attach") || location.href.includes("shop/bag") || location.href.includes("step=")"#;
 const POLL_INTERVAL: Duration = Duration::from_millis(400);
 
 /// 加购按钮的语义标识。Apple 在按钮上保留了 `data-autom`，比按文字或
@@ -295,8 +294,8 @@ impl BagSession {
             });
         }
 
-        let chrome = find_chromium()
-            .ok_or("未找到 Google Chrome 或 Microsoft Edge，无法自动加入购物袋")?;
+        let chrome =
+            find_chromium().ok_or("未找到 Google Chrome 或 Microsoft Edge，无法自动加入购物袋")?;
         let profile_arg = format!("--user-data-dir={}", profile.display());
         let user_agent_arg = format!("--user-agent={}", chromium_user_agent());
         // 浏览器自己的 stderr 落到 profile 目录里。
@@ -351,7 +350,10 @@ impl BagSession {
 
     /// 连接是否还能用：发一条最轻的命令，有界等待。
     async fn alive(&mut self) -> bool {
-        let probe = self.command("Runtime.evaluate", json!({ "expression": "1", "returnByValue": true }));
+        let probe = self.command(
+            "Runtime.evaluate",
+            json!({ "expression": "1", "returnByValue": true }),
+        );
         match tokio::time::timeout(PROBE_TIMEOUT, probe).await {
             Ok(Ok(_)) => true,
             Ok(Err(error)) => !connection_lost(&error),
@@ -373,8 +375,7 @@ impl BagSession {
 
     /// 把窗口导航到指定地址（并尽量把它带到前台）。
     pub async fn navigate(&mut self, url: &str) -> Result<(), String> {
-        self.command("Page.navigate", json!({ "url": url }))
-            .await?;
+        self.command("Page.navigate", json!({ "url": url })).await?;
         Ok(())
     }
 
@@ -566,7 +567,6 @@ impl BagSession {
             "selected"
         };
 
-
         // 6. 停在购物袋页面，把最后一步和付款留给用户。
         self.command("Page.navigate", json!({ "url": bag_url }))
             .await?;
@@ -576,7 +576,10 @@ impl BagSession {
             "购物袋页面加载",
         )
         .await?;
-        let url = self.current_url().await.unwrap_or_else(|_| bag_url.to_owned());
+        let url = self
+            .current_url()
+            .await
+            .unwrap_or_else(|_| bag_url.to_owned());
 
         let applecare_note = if applecare {
             "含 AppleCare+"
@@ -840,9 +843,7 @@ async fn attach(port: u16) -> Result<Socket, String> {
             // 去重开 —— 重开会被已有实例接管并立即退出，最后表现为一个莫名其妙的
             // 启动失败。注意 /json/new 只接受 PUT，GET 会返回 405。
             reqwest::Client::new()
-                .put(format!(
-                    "http://127.0.0.1:{port}/json/new?url=about:blank"
-                ))
+                .put(format!("http://127.0.0.1:{port}/json/new?url=about:blank"))
                 .send()
                 .await
                 .map_err(|e| format!("无法新建浏览器标签页：{e}"))?;
@@ -868,12 +869,19 @@ async fn attach(port: u16) -> Result<Socket, String> {
 pub async fn ensure_no_checkout_pages(profile: &Path) -> Result<(), String> {
     let port = live_port(profile).await.ok_or("买家浏览器状态不可确认")?;
     let pages: Vec<DebugTarget> = tokio::time::timeout(Duration::from_secs(10), async {
-        reqwest::get(format!("http://127.0.0.1:{port}/json/list")).await?
-            .json().await
-    }).await.map_err(|_| "检查买家页面超时")?
-        .map_err(|_: reqwest::Error| "检查买家页面失败")?;
-    if pages.iter().filter(|p| p.kind == "page")
-        .any(|p| !crate::automation::safe_to_navigate(p.url.as_deref().unwrap_or_default())) {
+        reqwest::get(format!("http://127.0.0.1:{port}/json/list"))
+            .await?
+            .json()
+            .await
+    })
+    .await
+    .map_err(|_| "检查买家页面超时")?
+    .map_err(|_: reqwest::Error| "检查买家页面失败")?;
+    if pages
+        .iter()
+        .filter(|p| p.kind == "page")
+        .any(|p| !crate::automation::safe_to_navigate(p.url.as_deref().unwrap_or_default()))
+    {
         return Err("买家窗口含结账、订单或未知页面；自动加购已跳过".into());
     }
     Ok(())
@@ -886,12 +894,19 @@ pub async fn ensure_no_order_pages(profile: &Path) -> Result<(), String> {
         return Ok(());
     };
     let pages: Vec<DebugTarget> = tokio::time::timeout(Duration::from_secs(10), async {
-        reqwest::get(format!("http://127.0.0.1:{port}/json/list")).await?
-            .json().await
-    }).await.map_err(|_| "检查买家页面超时")?
-        .map_err(|_: reqwest::Error| "检查买家页面失败")?;
-    if pages.iter().filter(|p| p.kind == "page")
-        .any(|p| !crate::automation::checkout_may_start(p.url.as_deref().unwrap_or_default())) {
+        reqwest::get(format!("http://127.0.0.1:{port}/json/list"))
+            .await?
+            .json()
+            .await
+    })
+    .await
+    .map_err(|_| "检查买家页面超时")?
+    .map_err(|_: reqwest::Error| "检查买家页面失败")?;
+    if pages
+        .iter()
+        .filter(|p| p.kind == "page")
+        .any(|p| !crate::automation::checkout_may_start(p.url.as_deref().unwrap_or_default()))
+    {
         return Err("买家窗口里已有订单页面，订单可能已经生成；自动结账没有开始".into());
     }
     Ok(())
@@ -913,7 +928,10 @@ async fn pick_page_target(port: u16) -> Result<Option<(String, String)>, String>
         .into_iter()
         .filter(|target| target.kind == "page")
         .filter_map(|target| {
-            Some((target.web_socket_debugger_url?, target.url.unwrap_or_default()))
+            Some((
+                target.web_socket_debugger_url?,
+                target.url.unwrap_or_default(),
+            ))
         })
         .collect();
 
@@ -958,28 +976,28 @@ mod tests {
         let product_url = std::env::var("FRUIT_RADAR_BAG_TEST_URL").unwrap_or_else(|_| {
             "https://www.apple.com.cn/shop/buy-iphone/iphone-17/mg724ch/a".to_owned()
         });
-        let expect = std::env::var("FRUIT_RADAR_BAG_TEST_EXPECT")
-            .unwrap_or_else(|_| "iPhone 17".to_owned());
+        let expect =
+            std::env::var("FRUIT_RADAR_BAG_TEST_EXPECT").unwrap_or_else(|_| "iPhone 17".to_owned());
         eprintln!("测试靶子：{product_url}（期望购物袋里出现「{expect}」）");
 
         // 用固定前缀的独立目录，**失败时不删除**：出问题时要能进去看
         // chrome-stderr.log。目录名带进程号，避免和上一轮残留的浏览器抢同一个
         // profile（Chrome 遇到已在使用的 profile 会直接退出）。
-        let profile = std::env::temp_dir().join(format!("fruit-radar-bag-e2e-{}", std::process::id()));
+        let profile =
+            std::env::temp_dir().join(format!("fruit-radar-bag-e2e-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&profile);
         std::fs::create_dir_all(&profile).expect("创建测试 profile 失败");
-        eprintln!("测试 profile：{}（失败时可在此查看 chrome-stderr.log）", profile.display());
+        eprintln!(
+            "测试 profile：{}（失败时可在此查看 chrome-stderr.log）",
+            profile.display()
+        );
 
         let mut session = BagSession::start_visible(&profile)
             .await
             .expect("启动买家浏览器失败");
 
         let outcome = session
-            .add_to_bag(
-                &product_url,
-                "https://www.apple.com.cn/shop/bag",
-                false,
-            )
+            .add_to_bag(&product_url, "https://www.apple.com.cn/shop/bag", false)
             .await
             .expect("加购失败");
 
@@ -1013,8 +1031,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "会打开可见浏览器窗口，按需手动运行"]
     async fn 关掉所有窗口后仍能接管买家浏览器() {
-        let profile = std::env::temp_dir()
-            .join(format!("fruit-radar-bag-nopage-{}", std::process::id()));
+        let profile =
+            std::env::temp_dir().join(format!("fruit-radar-bag-nopage-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&profile);
         std::fs::create_dir_all(&profile).expect("创建测试 profile 失败");
 
@@ -1024,7 +1042,9 @@ mod tests {
 
         close_all_pages(&profile).await.expect("关闭页面目标失败");
         assert_eq!(
-            pick_page_target(read_port(&profile)).await.expect("查询页面目标失败"),
+            pick_page_target(read_port(&profile))
+                .await
+                .expect("查询页面目标失败"),
             None,
             "页面目标本应已全部关闭"
         );
@@ -1109,10 +1129,16 @@ mod tests {
             let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
             let mut served = 0;
             while served < answers {
-                let Some(Ok(Message::Text(text))) = socket.next().await else { break };
+                let Some(Ok(Message::Text(text))) = socket.next().await else {
+                    break;
+                };
                 let request: Value = serde_json::from_str(&text).unwrap();
-                let reply = json!({ "id": request["id"], "result": { "result": { "value": "ok" } } });
-                socket.send(Message::Text(reply.to_string().into())).await.unwrap();
+                let reply =
+                    json!({ "id": request["id"], "result": { "result": { "value": "ok" } } });
+                socket
+                    .send(Message::Text(reply.to_string().into()))
+                    .await
+                    .unwrap();
                 served += 1;
             }
             // 不发 Close 帧直接断开，和日志里的 "Connection reset without closing handshake" 一致。
@@ -1124,7 +1150,11 @@ mod tests {
 
     async fn session_to(url: &str) -> BagSession {
         let (socket, _) = connect_async(url).await.unwrap();
-        BagSession { child: None, socket, next_command_id: 1 }
+        BagSession {
+            child: None,
+            socket,
+            next_command_id: 1,
+        }
     }
 
     #[tokio::test]
@@ -1168,7 +1198,11 @@ mod tests {
         .expect("健康会话直接复用");
         assert_eq!(reconnects.load(std::sync::atomic::Ordering::SeqCst), 0);
         registry.close_and_terminate();
-        assert!(ensure_session_with(&mut slot, &registry, || async { Err("x".to_string()) }).await.is_err());
+        assert!(
+            ensure_session_with(&mut slot, &registry, || async { Err("x".to_string()) })
+                .await
+                .is_err()
+        );
     }
 
     #[test]
@@ -1197,7 +1231,11 @@ mod tests {
         let late = Command::new("sleep").arg("60").spawn().unwrap();
         let late_pid = late.id() as i32;
         assert!(registry.register(BuyerProcess::for_test(late)).is_err());
-        assert_eq!(unsafe { libc::kill(late_pid, 0) }, -1, "退出后启动的进程必须立即回收");
+        assert_eq!(
+            unsafe { libc::kill(late_pid, 0) },
+            -1,
+            "退出后启动的进程必须立即回收"
+        );
     }
 
     #[test]
@@ -1211,6 +1249,13 @@ mod tests {
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "买家浏览器进程应已回收");
         process.terminate();
     }
+}
+
+fn order_from_page(href: &str, matched: &str) -> Option<String> {
+    let number = matched.trim();
+    let digits = number.strip_prefix('W')?;
+    (href.contains("thankyou") && digits.len() >= 8 && digits.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| number.to_owned())
 }
 
 #[cfg(test)]
@@ -1231,11 +1276,4 @@ mod review_tests {
             assert_eq!(order_from_page(href, number), None, "{href}: {number}");
         }
     }
-}
-
-fn order_from_page(href: &str, matched: &str) -> Option<String> {
-    let number = matched.trim();
-    let digits = number.strip_prefix('W')?;
-    (href.contains("thankyou") && digits.len() >= 8 && digits.bytes().all(|b| b.is_ascii_digit()))
-        .then(|| number.to_owned())
 }

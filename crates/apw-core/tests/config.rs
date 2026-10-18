@@ -652,8 +652,16 @@ fn 设置的线上格式是小驼峰() {
         assert!(checkout.contains_key(key), "checkout 缺少字段 {key}");
     }
     // 联系人与证件后四位只有顶层 pickup* 一份来源，checkout 里不能再出现第二份。
-    for key in ["nationalIdSuffix", "fillContact", "contactLastName", "contactPhone"] {
-        assert!(!checkout.contains_key(key), "checkout 不该有重复联系人字段 {key}");
+    for key in [
+        "nationalIdSuffix",
+        "fillContact",
+        "contactLastName",
+        "contactPhone",
+    ] {
+        assert!(
+            !checkout.contains_key(key),
+            "checkout 不该有重复联系人字段 {key}"
+        );
     }
     assert_eq!(checkout.len(), 7);
     assert_eq!(checkout["payment"], "installment");
@@ -768,8 +776,10 @@ fn 旧配置缺少自动结账与暂停字段时保持关闭() {
 #[test]
 fn 证件后四位只保留字母数字并转大写() {
     assert_eq!(normalized_id_suffix(" 12-3x9 "), "123X");
-    let mut settings = Settings::default();
-    settings.pickup_id_last4 = "12x".into();
+    let mut settings = Settings {
+        pickup_id_last4: "12x".into(),
+        ..Settings::default()
+    };
     assert!(!settings.has_pickup_id_suffix());
     settings.pickup_id_last4 = "12-3x".into();
     assert!(settings.has_pickup_id_suffix());

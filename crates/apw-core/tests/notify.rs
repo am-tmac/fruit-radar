@@ -22,8 +22,14 @@ use apw_core::notify::{Bark, Multi, Notification, Notifier, NotifyError, Sound};
 /// 一旦在断言之前先解码一次，斜杠有没有变成 %2F 就看不出来了。
 #[tokio::test]
 async fn transport_error_does_not_include_device_key() {
-    let bark = Bark::new("http://127.0.0.1:1/private-device-key".into(), reqwest::Client::new());
-    let err = bark.notify(&Notification::new("title", "body")).await.unwrap_err();
+    let bark = Bark::new(
+        "http://127.0.0.1:1/private-device-key".into(),
+        reqwest::Client::new(),
+    );
+    let err = bark
+        .notify(&Notification::new("title", "body"))
+        .await
+        .unwrap_err();
     assert!(!err.to_string().contains("private-device-key"));
 }
 

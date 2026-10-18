@@ -22,7 +22,11 @@ impl Drop for Ticket {
     fn drop(&mut self) {
         if let Some(owner) = self.owner.upgrade() {
             let mut state = owner.lock().unwrap();
-            if state.pending.get(&self.key).is_some_and(|(id, _)| *id == self.generation) {
+            if state
+                .pending
+                .get(&self.key)
+                .is_some_and(|(id, _)| *id == self.generation)
+            {
                 state.pending.remove(&self.key);
             }
         }
@@ -31,46 +35,85 @@ impl Drop for Ticket {
 impl Admission {
     pub fn admit(&mut self, locale: &str, sku: &str) -> Option<Ticket> {
         let mut state = self.0.lock().unwrap();
-        state.pending.retain(|_, (_, created)| created.elapsed() < Duration::from_secs(30));
+        state
+            .pending
+            .retain(|_, (_, created)| created.elapsed() < Duration::from_secs(30));
         let key = (locale.into(), sku.into());
         if state.pending.len() + state.attempted.len() >= 32
-            || state.pending.contains_key(&key) || state.attempted.contains(&key) { return None; }
+            || state.pending.contains_key(&key)
+            || state.attempted.contains(&key)
+        {
+            return None;
+        }
         state.next = state.next.checked_add(1)?;
         let generation = state.next;
-        state.pending.insert(key.clone(), (generation, Instant::now()));
-        Some(Ticket { generation, key, owner: Arc::downgrade(&self.0) })
+        state
+            .pending
+            .insert(key.clone(), (generation, Instant::now()));
+        Some(Ticket {
+            generation,
+            key,
+            owner: Arc::downgrade(&self.0),
+        })
     }
-    pub fn cancel(&mut self) { self.0.lock().unwrap().pending.clear(); }
+    pub fn cancel(&mut self) {
+        self.0.lock().unwrap().pending.clear();
+    }
     /// 这件商品是否有一次自动加购正在排队或进行（尚未提交）。
     pub fn is_pending(&self, locale: &str, sku: &str) -> bool {
         let state = self.0.lock().unwrap();
-        state.pending.get(&(locale.to_string(), sku.to_string()))
+        state
+            .pending
+            .get(&(locale.to_string(), sku.to_string()))
             .is_some_and(|(_, created)| created.elapsed() < Duration::from_secs(30))
     }
     /// 这件商品在本次运行里是否已经加购过（已提交、去重中）。
     pub fn attempted(&self, locale: &str, sku: &str) -> bool {
-        self.0.lock().unwrap().attempted.contains(&(locale.to_string(), sku.to_string()))
+        self.0
+            .lock()
+            .unwrap()
+            .attempted
+            .contains(&(locale.to_string(), sku.to_string()))
     }
     pub fn valid(&self, ticket: &Ticket) -> bool {
-        if !ticket.owner.ptr_eq(&Arc::downgrade(&self.0)) { return false; }
-        self.0.lock().unwrap().pending.get(&ticket.key).is_some_and(|(id, created)|
-            *id == ticket.generation && created.elapsed() < Duration::from_secs(30))
+        if !ticket.owner.ptr_eq(&Arc::downgrade(&self.0)) {
+            return false;
+        }
+        self.0
+            .lock()
+            .unwrap()
+            .pending
+            .get(&ticket.key)
+            .is_some_and(|(id, created)| {
+                *id == ticket.generation && created.elapsed() < Duration::from_secs(30)
+            })
     }
     pub fn commit(&mut self, ticket: &Ticket) -> bool {
-        if !ticket.owner.ptr_eq(&Arc::downgrade(&self.0)) { return false; }
+        if !ticket.owner.ptr_eq(&Arc::downgrade(&self.0)) {
+            return false;
+        }
         let mut state = self.0.lock().unwrap();
-        if !state.pending.get(&ticket.key).is_some_and(|(id, created)|
-            *id == ticket.generation && created.elapsed() < Duration::from_secs(30)) { return false; }
+        if !state.pending.get(&ticket.key).is_some_and(|(id, created)| {
+            *id == ticket.generation && created.elapsed() < Duration::from_secs(30)
+        }) {
+            return false;
+        }
         state.pending.remove(&ticket.key);
         state.attempted.insert(ticket.key.clone());
         true
     }
 }
 pub fn safe_to_navigate(url: &str) -> bool {
-    if url == "about:blank" { return true; }
-    let Ok(url) = reqwest::Url::parse(url) else { return false; };
+    if url == "about:blank" {
+        return true;
+    }
+    let Ok(url) = reqwest::Url::parse(url) else {
+        return false;
+    };
     let host = url.host_str().unwrap_or_default();
-    if host != "www.apple.com" && host != "www.apple.com.cn" { return false; }
+    if host != "www.apple.com" && host != "www.apple.com.cn" {
+        return false;
+    }
     let path = url.path();
     path.ends_with("/shop/bag") || path.contains("/shop/buy-") || path.contains("/shop/product/")
 }
@@ -81,9 +124,10 @@ pub fn safe_to_navigate(url: &str) -> bool {
 /// 自动加购的 [`safe_to_navigate`] 守卫不用在这里：结账流程本来就要进入结账页。
 pub fn checkout_may_start(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
-    !(lower.contains("thankyou") || lower.contains("/shop/order/") || lower.contains("/shop/checkout/order"))
+    !(lower.contains("thankyou")
+        || lower.contains("/shop/order/")
+        || lower.contains("/shop/checkout/order"))
 }
-
 
 /// 一次到货里自动加购这一步的结果，决定能不能接着结账。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,13 +179,20 @@ pub async fn chain_hit<S, T, R>(
 pub struct OrderLease(std::sync::Arc<std::sync::atomic::AtomicBool>);
 impl OrderLease {
     pub fn acquire(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Option<Self> {
-        flag.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst,
-            std::sync::atomic::Ordering::SeqCst).ok()?;
+        flag.compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .ok()?;
         Some(Self(flag))
     }
 }
 impl Drop for OrderLease {
-    fn drop(&mut self) { self.0.store(false, std::sync::atomic::Ordering::SeqCst); }
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[cfg(test)]
@@ -168,36 +219,62 @@ mod tests {
                 Ok(apw_core::apple::StoreAvailability {
                     store_number: store.into(),
                     store_name: "Offline".into(),
-                    parts: targets.iter().map(|t| (t.part_number.clone(), apw_core::apple::PartStatus {
-                        part_number: t.part_number.clone(),
-                        availability: Availability::InStock,
-                        product_title: None,
-                        pickup_display: "available".into(),
-                        pickup_details: None,
-                    })).collect(),
+                    parts: targets
+                        .iter()
+                        .map(|t| {
+                            (
+                                t.part_number.clone(),
+                                apw_core::apple::PartStatus {
+                                    part_number: t.part_number.clone(),
+                                    availability: Availability::InStock,
+                                    product_title: None,
+                                    pickup_display: "available".into(),
+                                    pickup_details: None,
+                                },
+                            )
+                        })
+                        .collect(),
                 })
             }
         }
         let target = Target {
-            locale: "zh_CN".into(), store_number: "R000".into(), store_title: "Offline".into(),
-            part_number: "TEST1CH/A".into(), product_name: "测试商品".into(),
-            companion_part: None, companion_name: None, kit_part: None, pickup_location: None,
+            locale: "zh_CN".into(),
+            store_number: "R000".into(),
+            store_title: "Offline".into(),
+            part_number: "TEST1CH/A".into(),
+            product_name: "测试商品".into(),
+            companion_part: None,
+            companion_name: None,
+            kit_part: None,
+            pickup_location: None,
         };
-        let (watcher, mut events) = Watcher::spawn(InStock, WatcherConfig { interval: Duration::from_secs(3600), ..Default::default() });
+        let (watcher, mut events) = Watcher::spawn(
+            InStock,
+            WatcherConfig {
+                interval: Duration::from_secs(3600),
+                ..Default::default()
+            },
+        );
         watcher.set_targets(vec![target.clone()]).await;
         watcher.start().await;
         let hit = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if let Some(Event::InStock { state }) = events.recv().await { break state.target; }
+                if let Some(Event::InStock { state }) = events.recv().await {
+                    break state.target;
+                }
             }
-        }).await.expect("离线一轮应当到货");
+        })
+        .await
+        .expect("离线一轮应当到货");
         watcher.stop().await;
         assert_eq!(hit.part_number, target.part_number);
 
         let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
         let bag = std::sync::Arc::new(tokio::sync::Mutex::new(()));
         let mut gate = Admission::default();
-        let ticket = gate.admit(&hit.locale, &hit.part_number).expect("首次到货受理加购");
+        let ticket = gate
+            .admit(&hit.locale, &hit.part_number)
+            .expect("首次到货受理加购");
         let (add_started_tx, add_started_rx) = tokio::sync::oneshot::channel::<()>();
         let watcher_probe = {
             let (bag, log) = (bag.clone(), log.clone());
@@ -223,11 +300,15 @@ mod tests {
                 assert_eq!(*step, BagStep::Added);
                 l2.lock().unwrap().push("checkout");
             }),
-        ).await;
+        )
+        .await;
         watcher_probe.await.unwrap();
         assert_eq!(step, BagStep::Added);
         assert!(checkout.is_some() && added == Some("added"));
-        assert_eq!(*log.lock().unwrap(), vec!["add-start", "add-done", "checkout", "order-watch"]);
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["add-start", "add-done", "checkout", "order-watch"]
+        );
     }
 
     type AsyncNoop = fn(&mut u8) -> std::future::Ready<Result<(), String>>;
@@ -240,7 +321,8 @@ mod tests {
             Some(async |_: &mut u8| Err::<(), _>("加购超时".to_string())),
             false,
             Some(async |_: &mut u8, _: &BagStep| "checkout"),
-        ).await;
+        )
+        .await;
         assert_eq!(step, BagStep::Failed("加购超时".into()));
         assert!(checkout.is_none(), "加购失败时不能开始结账");
 
@@ -249,7 +331,8 @@ mod tests {
             None::<AsyncNoop>,
             true,
             Some(async |_: &mut u8, step: &BagStep| step.clone()),
-        ).await;
+        )
+        .await;
         assert_eq!(step, BagStep::AlreadyAttempted);
         assert_eq!(checkout, Some(BagStep::AlreadyAttempted));
     }
@@ -257,7 +340,9 @@ mod tests {
     #[test]
     fn checkout_and_unknown_pages_cannot_be_navigated() {
         assert!(!safe_to_navigate("https://www.apple.com.cn/shop/checkout"));
-        assert!(!safe_to_navigate("https://secure.apple.com/shop/order/thanks"));
+        assert!(!safe_to_navigate(
+            "https://secure.apple.com/shop/order/thanks"
+        ));
         assert!(!safe_to_navigate("https://idmsa.apple.com/"));
         assert!(safe_to_navigate("about:blank"));
         assert!(safe_to_navigate("https://www.apple.com.cn/shop/bag"));
@@ -265,12 +350,20 @@ mod tests {
     #[test]
     fn checkout_never_starts_over_an_existing_order_page() {
         assert!(checkout_may_start("https://www.apple.com.cn/shop/bag"));
-        assert!(checkout_may_start("https://secure.www.apple.com.cn/shop/checkout?_s=Review"));
+        assert!(checkout_may_start(
+            "https://secure.www.apple.com.cn/shop/checkout?_s=Review"
+        ));
         assert!(checkout_may_start("about:blank"));
-        assert!(!checkout_may_start("https://secure.www.apple.com.cn/shop/checkout/thankyou"));
-        assert!(!checkout_may_start("https://www.apple.com.cn/shop/order/detail/12345"));
+        assert!(!checkout_may_start(
+            "https://secure.www.apple.com.cn/shop/checkout/thankyou"
+        ));
+        assert!(!checkout_may_start(
+            "https://www.apple.com.cn/shop/order/detail/12345"
+        ));
         // 结账页对自动加购仍然是禁区。
-        assert!(!safe_to_navigate("https://secure.www.apple.com.cn/shop/checkout?_s=Review"));
+        assert!(!safe_to_navigate(
+            "https://secure.www.apple.com.cn/shop/checkout?_s=Review"
+        ));
     }
     #[test]
     fn order_listener_is_single_instance_and_releases_on_drop() {
@@ -288,13 +381,19 @@ mod tests {
         assert!(gate.admit("en_US", "SKU").is_some());
         gate.cancel();
         assert!(!gate.valid(&ticket));
-        assert!(gate.admit("zh_CN", "SKU").is_some(), "cancel must release unattempted reservations");
+        assert!(
+            gate.admit("zh_CN", "SKU").is_some(),
+            "cancel must release unattempted reservations"
+        );
     }
     #[tokio::test]
     async fn cancelled_unpolled_task_releases_pending() {
         let mut gate = Admission::default();
         let ticket = gate.admit("zh_CN", "SKU").unwrap();
-        let task = tokio::spawn(async move { let _ticket = ticket; std::future::pending::<()>().await; });
+        let task = tokio::spawn(async move {
+            let _ticket = ticket;
+            std::future::pending::<()>().await;
+        });
         task.abort();
         let _ = task.await;
         assert!(gate.admit("zh_CN", "SKU").is_some());
@@ -335,7 +434,9 @@ mod tests {
     #[test]
     fn admission_is_bounded_and_expires() {
         let mut gate = Admission::default();
-        let tickets: Vec<_> = (0..32).map(|n| gate.admit("zh_CN", &n.to_string()).unwrap()).collect();
+        let tickets: Vec<_> = (0..32)
+            .map(|n| gate.admit("zh_CN", &n.to_string()).unwrap())
+            .collect();
         assert!(gate.admit("zh_CN", "overflow").is_none());
         for (_, created) in gate.0.lock().unwrap().pending.values_mut() {
             *created = Instant::now() - Duration::from_secs(31);

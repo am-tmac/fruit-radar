@@ -35,11 +35,22 @@ pub fn append(path: &Path, lines: &[String]) -> std::io::Result<()> {
     }
 
     // A stable sidecar lock covers append AND rotation across threads/processes.
-    let lock = std::fs::OpenOptions::new().create(true).truncate(false)
-        .write(true).open(path.with_extension("log.lock"))?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_extension("log.lock"))?;
     lock.lock()?;
-    let mut block = lines.iter().rev().take(KEEP_LINES).map(|line| sanitize(line))
-        .collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+    let mut block = lines
+        .iter()
+        .rev()
+        .take(KEEP_LINES)
+        .map(|line| sanitize(line))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
     block.push('\n');
     let existing = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     if existing + block.len() as u64 > MAX_BYTES {
@@ -54,7 +65,10 @@ pub fn append(path: &Path, lines: &[String]) -> std::io::Result<()> {
         tmp.write_all(trimmed.as_bytes())?;
         tmp.persist(path).map_err(|e| e.error)?;
     } else {
-        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
         file.write_all(block.as_bytes())?;
     }
     Ok(())
@@ -66,11 +80,13 @@ pub fn append(path: &Path, lines: &[String]) -> std::io::Result<()> {
 /// 而覆写让「滚动之后文件里到底剩什么」一目了然。
 #[cfg(test)]
 fn trim(path: &Path, keep_lines: usize, budget: usize) -> std::io::Result<()> {
-    std::fs::write(path, tail_with_budget(&std::fs::read_to_string(path)?, keep_lines, budget))
+    std::fs::write(
+        path,
+        tail_with_budget(&std::fs::read_to_string(path)?, keep_lines, budget),
+    )
 }
 
 fn tail_with_budget(content: &str, keep_lines: usize, budget: usize) -> String {
-
     let mut kept: Vec<&str> = Vec::new();
     let mut bytes = 0usize;
     for line in content.lines().rev() {
@@ -86,23 +102,34 @@ fn tail_with_budget(content: &str, keep_lines: usize, budget: usize) -> String {
         kept.push(line);
     }
 
-    if kept.is_empty() { String::new() }
-    else { kept.into_iter().rev().collect::<Vec<_>>().join("\n") + "\n" }
+    if kept.is_empty() {
+        String::new()
+    } else {
+        kept.into_iter().rev().collect::<Vec<_>>().join("\n") + "\n"
+    }
 }
 
 /// Defense in depth at the persistence boundary: never persist URL credentials.
 pub fn sanitize(line: &str) -> String {
     let mut out = String::new();
     for word in line.split_whitespace() {
-        if !out.is_empty() { out.push(' '); }
+        if !out.is_empty() {
+            out.push(' ');
+        }
         if let Some(at) = word.find("https://").or_else(|| word.find("http://")) {
             out.push_str(&word[..at]);
             out.push_str("[URL 已隐藏]");
-        } else { out.push_str(word); }
-        if out.len() >= 8192 { break; }
+        } else {
+            out.push_str(word);
+        }
+        if out.len() >= 8192 {
+            break;
+        }
     }
     let mut end = out.len().min(8192);
-    while !out.is_char_boundary(end) { end -= 1; }
+    while !out.is_char_boundary(end) {
+        end -= 1;
+    }
     out.truncate(end);
     out
 }
@@ -126,18 +153,32 @@ mod tests {
         std::thread::scope(|scope| {
             for i in 0..16 {
                 let path = &path;
-                scope.spawn(move || { for j in 0..20 { append(path, &[format!("{i}-{j}")]).unwrap(); } });
+                scope.spawn(move || {
+                    for j in 0..20 {
+                        append(path, &[format!("{i}-{j}")]).unwrap();
+                    }
+                });
             }
         });
         let text = content(&path);
-        assert_eq!(text.lines().collect::<std::collections::HashSet<_>>().len(), 320);
+        assert_eq!(
+            text.lines().collect::<std::collections::HashSet<_>>().len(),
+            320
+        );
     }
 
     #[test]
     fn oversized_utf8_line_is_bounded_and_urls_are_redacted() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("activity.log");
-        append(&path, &[format!("failed https://api.day.app/secret-key/title {}", "果".repeat(MAX_BYTES as usize))]).unwrap();
+        append(
+            &path,
+            &[format!(
+                "failed https://api.day.app/secret-key/title {}",
+                "果".repeat(MAX_BYTES as usize)
+            )],
+        )
+        .unwrap();
         let text = content(&path);
         assert!(text.len() <= MAX_BYTES as usize);
         assert!(!text.contains("secret-key"));
@@ -195,7 +236,10 @@ mod tests {
             written += 1;
             append(&path, &[format!("[{written:05}] {big}")]).unwrap();
             let size = std::fs::metadata(&path).unwrap().len();
-            assert!(size <= MAX_BYTES, "第 {written} 次追加后仍有 {size} 字节，滚动没生效");
+            assert!(
+                size <= MAX_BYTES,
+                "第 {written} 次追加后仍有 {size} 字节，滚动没生效"
+            );
         }
 
         assert!(
@@ -203,11 +247,13 @@ mod tests {
             "收尾时仍在超限状态"
         );
         // 留下的必须是**最新**的，否则滚动等于把有用的部分删了。
-        assert!(content(&path)
-            .lines()
-            .last()
-            .unwrap()
-            .starts_with(&format!("[{written:05}]")));
+        assert!(
+            content(&path)
+                .lines()
+                .last()
+                .unwrap()
+                .starts_with(&format!("[{written:05}]"))
+        );
     }
 
     #[test]
@@ -231,7 +277,10 @@ mod tests {
         let kept = text.lines().count();
         // 行数上限只在滚动那一刻执行，两次滚动之间还会再堆一点零头。
         // 这里 4 KB 一行，零头顶多几十行，给 100 行的余量足够说明问题。
-        assert!(kept <= KEEP_LINES + 100, "滚动后留下 {kept} 行，远超行数上限");
+        assert!(
+            kept <= KEEP_LINES + 100,
+            "滚动后留下 {kept} 行，远超行数上限"
+        );
         assert!(kept > 0, "滚动把日志清空了");
         assert!(kept < total, "根本没发生过滚动");
         assert!(

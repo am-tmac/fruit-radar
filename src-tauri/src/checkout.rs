@@ -683,7 +683,10 @@ impl<P: CdpPage> Flow<'_, P> {
     async fn bag(&mut self) -> Result<(), CheckoutError> {
         self.report("自动结账：打开购物袋");
         // 标记当前文档：导航完成后新文档不带这个标记，据此区分新旧页面。
-        let _ = self.session.evaluate("window.__apwStaleBag = true", false).await;
+        let _ = self
+            .session
+            .evaluate("window.__apwStaleBag = true", false)
+            .await;
         let navigation = self
             .session
             .command("Page.navigate", json!({ "url": BAG_URL }))
@@ -1360,7 +1363,10 @@ impl CheckoutRunner {
         progress: &(dyn Fn(String) + Send + Sync),
     ) -> Result<CheckoutOutcome, CheckoutError> {
         if self.is_cancelled() {
-            return Err(CheckoutError::new(Stage::Browser, "应用正在退出，自动结账已中止"));
+            return Err(CheckoutError::new(
+                Stage::Browser,
+                "应用正在退出，自动结账已中止",
+            ));
         }
         if plan.national_id_suffix.chars().count() != 4 {
             return Err(CheckoutError::new(
@@ -1484,7 +1490,11 @@ pub fn merge_ui_settings(current: &Settings, mut incoming: Settings) -> Settings
 }
 
 /// 用户在界面上明确切换自动结账开关。
-pub fn with_switches(current: &Settings, enabled: Option<bool>, place_order: Option<bool>) -> Settings {
+pub fn with_switches(
+    current: &Settings,
+    enabled: Option<bool>,
+    place_order: Option<bool>,
+) -> Settings {
     let mut next = current.clone();
     if let Some(enabled) = enabled {
         next.checkout.enabled = enabled;
@@ -1644,7 +1654,14 @@ mod tests {
 
     impl FakePage {
         fn new(items: Vec<(&'static str, &'static str)>) -> Self {
-            Self { step: "", items, store_checked: true, region_error: None, clicks: Vec::new(), scripts: Vec::new() }
+            Self {
+                step: "",
+                items,
+                store_checked: true,
+                region_error: None,
+                clicks: Vec::new(),
+                scripts: Vec::new(),
+            }
         }
         fn clicked(&self, needle: &str) -> usize {
             self.clicks.iter().filter(|c| c.contains(needle)).count()
@@ -1665,7 +1682,9 @@ mod tests {
         async fn evaluate(&mut self, script: &str, _await: bool) -> Result<Value, String> {
             self.scripts.push(script.to_string());
             if script.contains("window.__apwPickupRegion") {
-                return Ok(js(json!({"ready": self.region_error.is_none(), "error": self.region_error})));
+                return Ok(js(
+                    json!({"ready": self.region_error.is_none(), "error": self.region_error}),
+                ));
             }
             if script.contains("if (!e || e.disabled) return false;") {
                 self.clicks.push(script.to_string());
@@ -1685,7 +1704,9 @@ mod tests {
                 return Ok(Value::Bool(true));
             }
             if script.contains("needsId") {
-                return Ok(js(json!({"ready": self.step == "PickupContact", "missing": [], "needsId": true})));
+                return Ok(js(
+                    json!({"ready": self.step == "PickupContact", "missing": [], "needsId": true}),
+                ));
             }
             if script.contains("Object.entries(values)") {
                 return Ok(js(json!([])));
@@ -1706,10 +1727,16 @@ mod tests {
                 })));
             }
             if script.contains("checkout-billingOptions-") {
-                return Ok(js(json!({"count": 1, "found": true, "id": "ALIPAY", "checked": true, "options": ["支付宝"]})));
+                return Ok(js(
+                    json!({"count": 1, "found": true, "id": "ALIPAY", "checked": true, "options": ["支付宝"]}),
+                ));
             }
             if script.contains("bag-item-") {
-                let items: Vec<_> = self.items.iter().map(|(n, q)| json!({"name": n, "quantity": q})).collect();
+                let items: Vec<_> = self
+                    .items
+                    .iter()
+                    .map(|(n, q)| json!({"name": n, "quantity": q}))
+                    .collect();
                 return Ok(js(json!({
                     "items": items, "total": "RMB 0.00",
                     "canCheckout": self.step == "Bag" && !self.items.is_empty(),
@@ -1721,12 +1748,17 @@ mod tests {
                 return Ok(js(json!({"step": self.step, "signIn": false})));
             }
             if script.contains(r"W\d{8,12}") {
-                return Ok(js(json!({"step": self.step, "order": if self.step == "Thankyou" { "W0000000000" } else { "" }})));
+                return Ok(js(
+                    json!({"step": self.step, "order": if self.step == "Thankyou" { "W0000000000" } else { "" }}),
+                ));
             }
             if script.contains("role=\"alert\"") {
                 return Ok(js(json!([])));
             }
-            Err(format!("假页面不认识的脚本：{}", &script[..script.len().min(60)]))
+            Err(format!(
+                "假页面不认识的脚本：{}",
+                &script[..script.len().min(60)]
+            ))
         }
     }
 
@@ -1795,12 +1827,20 @@ mod tests {
     #[tokio::test]
     async fn 默认停在查看订单页且不点立即下单() {
         let (target, settings) = fixture_settings(false);
-        let plan = CheckoutPlan::new(&target, &settings, &Catalog::new(), settings.checkout.place_order);
+        let plan = CheckoutPlan::new(
+            &target,
+            &settings,
+            &Catalog::new(),
+            settings.checkout.place_order,
+        );
         let runner = CheckoutRunner::new();
         let lease = runner.try_begin().unwrap();
         let mut page = FakePage::new(vec![("测试商品 256GB", "1")]);
         let result = runner.run(&lease, &mut page, &plan, &|_| {}).await;
-        assert!(matches!(result, Ok(CheckoutOutcome::ReachedReview { .. })), "{result:?}");
+        assert!(
+            matches!(result, Ok(CheckoutOutcome::ReachedReview { .. })),
+            "{result:?}"
+        );
         assert_eq!(page.clicked("continue-button-placeOrder"), 0);
         // 证件与联系人确实填进了页面脚本（取自取货信息）。
         assert!(page.scripts.iter().any(|s| s.contains("FixtureLast")));
@@ -1813,7 +1853,12 @@ mod tests {
     #[tokio::test]
     async fn 开启自动下单时只点一次立即下单_成功后关闭开关() {
         let (target, settings) = fixture_settings(true);
-        let plan = CheckoutPlan::new(&target, &settings, &Catalog::new(), settings.checkout.place_order);
+        let plan = CheckoutPlan::new(
+            &target,
+            &settings,
+            &Catalog::new(),
+            settings.checkout.place_order,
+        );
         let runner = CheckoutRunner::new();
         let lease = runner.try_begin().unwrap();
         let mut page = FakePage::new(vec![("测试商品 256GB", "1")]);
@@ -1827,7 +1872,10 @@ mod tests {
         assert_eq!(page.clicked("continue-button-placeOrder"), 1);
         let next = settings_after_checkout(&settings, &result).expect("应当写回设置");
         assert!(!next.checkout.enabled);
-        assert!(!next.checkout.place_order, "已下单后自动下单也必须关闭，重新开始监控不能再下第二单");
+        assert!(
+            !next.checkout.place_order,
+            "已下单后自动下单也必须关闭，重新开始监控不能再下第二单"
+        );
         // 关掉之后同一份设置不会再触发结账。
         assert!(!(next.checkout.enabled && next.is_checkout_target(&target)));
     }
@@ -1844,7 +1892,11 @@ mod tests {
         let error = result.clone().unwrap_err();
         assert_eq!(error.stage, Stage::Bag);
         assert!(error.message.contains("购物袋是空的"), "{error}");
-        assert!(started.elapsed() < Duration::from_secs(6), "空购物袋等了 {:?}", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_secs(6),
+            "空购物袋等了 {:?}",
+            started.elapsed()
+        );
         assert!(page.clicks.is_empty());
         assert!(settings_after_checkout(&settings, &result).is_none());
     }
@@ -1859,11 +1911,23 @@ mod tests {
         let started = Instant::now();
         let result = runner.run(&lease, &mut page, &plan, &|_| {}).await;
         let elapsed = started.elapsed();
-        assert!(matches!(result, Ok(CheckoutOutcome::ReachedReview { .. })), "{result:?}");
+        assert!(
+            matches!(result, Ok(CheckoutOutcome::ReachedReview { .. })),
+            "{result:?}"
+        );
         // 旧实现：3 次 1.2s 稳定窗口 + 0.4s 固定等待 ≈ 4s。页面立即就绪时应明显更快。
-        assert!(elapsed < Duration::from_millis(2500), "页面已就绪仍耗时 {elapsed:?}");
+        assert!(
+            elapsed < Duration::from_millis(2500),
+            "页面已就绪仍耗时 {elapsed:?}"
+        );
         // 安全核对仍在：门店与时段在点击继续前被反复读取，继续按钮只点一次。
-        assert!(page.scripts.iter().filter(|s| s.contains("searchPending")).count() >= 3);
+        assert!(
+            page.scripts
+                .iter()
+                .filter(|s| s.contains("searchPending"))
+                .count()
+                >= 3
+        );
         assert_eq!(page.clicked("fulfillment-continue-button"), 1);
     }
 
@@ -1890,7 +1954,10 @@ mod tests {
         other.product_name = "另一件商品".into();
 
         // 默认设置：不加购、不结账、不暂停。
-        let defaults = Settings { targets: vec![target.clone()], ..Default::default() };
+        let defaults = Settings {
+            targets: vec![target.clone()],
+            ..Default::default()
+        };
         assert_eq!(hit_actions(&defaults, &target), HitActions::default());
 
         let mut both = settings.clone();
@@ -1917,8 +1984,17 @@ mod tests {
         let (_, settings) = fixture_settings(false);
         let message = "页面提示：FixtureLastFixtureFirst pickup-fixture@example.invalid 00000000000 000X 已填";
         let redacted = redact_contact(message, &settings);
-        for secret in ["FixtureLast", "FixtureFirst", "pickup-fixture@example.invalid", "00000000000", "000X"] {
-            assert!(!redacted.contains(secret), "{secret} 没有被抹掉：{redacted}");
+        for secret in [
+            "FixtureLast",
+            "FixtureFirst",
+            "pickup-fixture@example.invalid",
+            "00000000000",
+            "000X",
+        ] {
+            assert!(
+                !redacted.contains(secret),
+                "{secret} 没有被抹掉：{redacted}"
+            );
         }
         assert!(redacted.starts_with("页面提示："));
         // 单字值不替换，避免误伤门店名等正常文字。
@@ -1942,7 +2018,10 @@ mod tests {
         let lease = runner.try_begin().unwrap();
         let mut page = FakePage::new(vec![("测试商品 256GB", "1")]);
         let result = runner.run(&lease, &mut page, &plan, &|_| {}).await;
-        assert!(matches!(result, Ok(CheckoutOutcome::OrderSubmitted { .. })), "{result:?}");
+        assert!(
+            matches!(result, Ok(CheckoutOutcome::OrderSubmitted { .. })),
+            "{result:?}"
+        );
         let after_order = settings_after_checkout(&settings, &result).expect("应当关闭开关");
         store.save(&after_order).unwrap();
 
@@ -1954,8 +2033,14 @@ mod tests {
         let on_disk = store.load().unwrap();
         assert!(!on_disk.checkout.enabled, "旧副本把自动结账重新打开了");
         assert!(!on_disk.checkout.place_order, "旧副本把自动下单重新打开了");
-        assert_eq!(on_disk.pickup_first_name, "FixtureOther", "其他字段照常保存");
-        assert!(!hit_actions(&on_disk, &target).checkout, "重新开始监控也不会再结账");
+        assert_eq!(
+            on_disk.pickup_first_name, "FixtureOther",
+            "其他字段照常保存"
+        );
+        assert!(
+            !hit_actions(&on_disk, &target).checkout,
+            "重新开始监控也不会再结账"
+        );
 
         // 用户明确再打开时才生效。
         let reenabled = with_switches(&on_disk, Some(true), None);
@@ -1995,7 +2080,10 @@ mod tests {
         assert!(runner.try_begin().is_none());
         let mut page = FakePage::new(vec![("测试商品 256GB", "1")]);
         let started = Instant::now();
-        let error = runner.run(&lease, &mut page, &plan, &|_| {}).await.unwrap_err();
+        let error = runner
+            .run(&lease, &mut page, &plan, &|_| {})
+            .await
+            .unwrap_err();
         assert!(error.message.contains("正在退出"));
         assert!(started.elapsed() < Duration::from_secs(1));
         assert!(page.clicks.is_empty());

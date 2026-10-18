@@ -404,8 +404,13 @@ impl ChromiumSession {
             )
         })?;
         let startup = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let result =
-            Self::launch(profile_dir.clone(), chrome.clone(), network_args, startup.clone()).await;
+        let result = Self::launch(
+            profile_dir.clone(),
+            chrome.clone(),
+            network_args,
+            startup.clone(),
+        )
+        .await;
         if let Err(error) = &result
             && profile_dir.is_dir()
         {
@@ -2531,9 +2536,9 @@ mod tests {
 
     #[tokio::test]
     async fn native_quit_barrier_waits_for_owned_child_and_allows_only_completed_reentry() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use crate::exit_barrier::ExitBarrier;
         use apw_core::watcher::{Watcher, WatcherConfig};
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         let (fetcher, peer) = cdp_responses(Vec::new()).await;
         let dir = tempfile::tempdir().unwrap();
@@ -2544,7 +2549,10 @@ mod tests {
         {
             let mut state = fetcher.state.lock().await;
             let session = state.session.as_mut().unwrap();
-            session._process = ChromiumProcess { child, process_group_id: None };
+            session._process = ChromiumProcess {
+                child,
+                process_group_id: None,
+            };
             session._owner = Some(crate::query_profile::ProfileOwner::claim(dir.path()).unwrap());
             session.profile_dir = dir.path().to_path_buf();
         }
@@ -2566,7 +2574,9 @@ mod tests {
         let (reentry_prevent, reentry_cleanup) = (prevented.clone(), cleanups.clone());
         let profile = dir.path().to_path_buf();
         barrier.request(
-            move || { p.fetch_add(1, Ordering::SeqCst); },
+            move || {
+                p.fetch_add(1, Ordering::SeqCst);
+            },
             async move {
                 c.fetch_add(1, Ordering::SeqCst);
                 started.notify_one();
@@ -2578,22 +2588,38 @@ mod tests {
                 assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
                 assert!(crate::query_profile::ProfileOwner::claim(&profile).is_ok());
                 reentry.request(
-                    move || { reentry_prevent.fetch_add(1, Ordering::SeqCst); },
-                    async move { reentry_cleanup.fetch_add(1, Ordering::SeqCst); },
+                    move || {
+                        reentry_prevent.fetch_add(1, Ordering::SeqCst);
+                    },
+                    async move {
+                        reentry_cleanup.fetch_add(1, Ordering::SeqCst);
+                    },
                     || panic!("recursive quit"),
                 );
                 e.fetch_add(1, Ordering::SeqCst);
                 let _ = done_tx.send(());
             },
         );
-        assert_eq!(prevented.load(Ordering::SeqCst), 1, "native Quit must be prevented synchronously");
-        tokio::time::timeout(Duration::from_secs(5), entered.notified()).await.unwrap();
+        assert_eq!(
+            prevented.load(Ordering::SeqCst),
+            1,
+            "native Quit must be prevented synchronously"
+        );
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
         // A repeated tray/Cmd-Q request while shutdown is blocked must not run another task.
         let (p, c, e) = (prevented.clone(), cleanups.clone(), exits.clone());
         barrier.request(
-            move || { p.fetch_add(1, Ordering::SeqCst); },
-            async move { c.fetch_add(1, Ordering::SeqCst); },
-            move || { e.fetch_add(1, Ordering::SeqCst); },
+            move || {
+                p.fetch_add(1, Ordering::SeqCst);
+            },
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+            },
+            move || {
+                e.fetch_add(1, Ordering::SeqCst);
+            },
         );
         assert_eq!(prevented.load(Ordering::SeqCst), 2);
         assert_eq!(cleanups.load(Ordering::SeqCst), 1);
@@ -2601,10 +2627,17 @@ mod tests {
         assert_eq!(unsafe { libc::kill(pid as i32, 0) }, 0);
         assert!(crate::query_profile::ProfileOwner::claim(dir.path()).is_err());
         release.notify_one();
-        tokio::time::timeout(Duration::from_secs(5), done_rx).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), done_rx)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(!watcher.is_running().await);
         assert!(peer.await.unwrap());
-        assert_eq!(prevented.load(Ordering::SeqCst), 2, "completed reentry must be allowed");
+        assert_eq!(
+            prevented.load(Ordering::SeqCst),
+            2,
+            "completed reentry must be allowed"
+        );
         assert_eq!(cleanups.load(Ordering::SeqCst), 1);
         assert_eq!(exits.load(Ordering::SeqCst), 1);
         assert_eq!(std::fs::read(cookie).unwrap(), b"offline quit cookies");
@@ -2622,15 +2655,23 @@ mod tests {
         {
             let mut state = fetcher.state.lock().await;
             let session = state.session.as_mut().unwrap();
-            session._process = ChromiumProcess { child, process_group_id: None };
+            session._process = ChromiumProcess {
+                child,
+                process_group_id: None,
+            };
             session.profile_dir = dir.path().to_path_buf();
             session._owner = Some(crate::query_profile::ProfileOwner::claim(dir.path()).unwrap());
         }
         let barrier = crate::exit_barrier::ExitBarrier::default();
         let handle = tokio::runtime::Handle::current();
         let ran = tokio::task::spawn_blocking(move || {
-            barrier.run_on_loop_exit(|| async { fetcher.shutdown().await }, |f| handle.block_on(f))
-        }).await.unwrap();
+            barrier.run_on_loop_exit(
+                || async { fetcher.shutdown().await },
+                |f| handle.block_on(f),
+            )
+        })
+        .await
+        .unwrap();
         assert!(ran);
         assert!(peer.await.unwrap());
         assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
@@ -4247,12 +4288,16 @@ mod tests {
         {
             let mut state = fetcher.state.lock().await;
             state.session = None;
-            state.session_start_failure = Some(
-                "浏览器专属资料目录被占用，或无法取得目录锁（退出码 21）".into(),
-            );
+            state.session_start_failure =
+                Some("浏览器专属资料目录被占用，或无法取得目录锁（退出码 21）".into());
         }
         let result = fetcher
-            .pickup_message(region_by_locale("zh_CN").unwrap(), "R390", &[test_target("one")], None)
+            .pickup_message(
+                region_by_locale("zh_CN").unwrap(),
+                "R390",
+                &[test_target("one")],
+                None,
+            )
             .await;
         match result {
             Err(ApiError::BrowserUnavailable(detail)) => assert!(detail.contains("退出码 21")),

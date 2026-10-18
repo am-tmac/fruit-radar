@@ -95,7 +95,7 @@ mod tests {
                     let _ = c.wait();
                 }
             },
-            |f| block_on(f),
+            block_on,
         );
         assert!(ran, "没走过 ExitRequested 时，run loop 退出必须执行清理");
         assert!(!alive(pid), "查询浏览器子进程必须被回收");
@@ -111,7 +111,7 @@ mod tests {
             || async {
                 calls.fetch_add(1, Ordering::SeqCst);
             },
-            |f| block_on(f),
+            block_on,
         );
         assert!(!ran);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -127,7 +127,7 @@ mod tests {
             || async {
                 calls.fetch_add(1, Ordering::SeqCst);
             },
-            |f| block_on(f),
+            block_on,
         );
         assert!(ran);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
