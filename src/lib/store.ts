@@ -388,6 +388,7 @@ export async function changeLocale(locale: string): Promise<void> {
 async function writeTargets(targets: Target[]): Promise<boolean> {
   try {
     const rows = await invoke<TargetState[]>("set_targets", { targets });
+    targets = rows.map((row) => row.target);
     const activeParts = new Set(targets.map((target) => target.partNumber));
     const productBarkUrls = Object.fromEntries(
       Object.entries(state.settings.productBarkUrls).filter(([partNumber]) =>

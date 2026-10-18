@@ -691,20 +691,18 @@ impl BagSession {
             .evaluate(
                 r#"(() => {
                     const href = location.href;
-                    if (!href.includes("thankyou") && !href.includes("/shop/order/")) return "";
+                    if (!href.includes("thankyou")) return { href, matched: "" };
                     const text = document.body.innerText;
                     const match = text.match(/(W\d{8,})/);
-                    return match ? match[1] : "unknown";
+                    return { href, matched: match ? match[1] : "" };
                 })()"#,
                 false,
             )
             .await?;
-        let order = raw.as_str().unwrap_or_default().trim().to_owned();
-        if order.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(order))
-        }
+        Ok(order_from_page(
+            raw["href"].as_str().unwrap_or_default(),
+            raw["matched"].as_str().unwrap_or_default(),
+        ))
     }
 
     pub(crate) async fn command(&mut self, method: &str, params: Value) -> Result<Value, String> {
@@ -1213,4 +1211,31 @@ mod tests {
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "买家浏览器进程应已回收");
         process.terminate();
     }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    #[test]
+    fn review_order_confirmation_only() {
+        assert_eq!(
+            order_from_page("/shop/checkout/thankyou", "W12345678"),
+            Some("W12345678".into())
+        );
+        for (href, number) in [
+            ("/shop/checkout/thankyou", ""),
+            ("/shop/checkout/thankyou", "unknown"),
+            ("/shop/order/list", "W12345678"),
+            ("/shop/order/detail/W12345678", "W12345678"),
+        ] {
+            assert_eq!(order_from_page(href, number), None, "{href}: {number}");
+        }
+    }
+}
+
+fn order_from_page(href: &str, matched: &str) -> Option<String> {
+    let number = matched.trim();
+    let digits = number.strip_prefix('W')?;
+    (href.contains("thankyou") && digits.len() >= 8 && digits.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| number.to_owned())
 }

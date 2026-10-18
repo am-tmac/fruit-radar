@@ -167,7 +167,14 @@ export interface CheckoutSettings {
   product: string;
 }
 
+export interface DeliveryRegion {
+  state: string;
+  city: string;
+  district: string;
+}
+
 export interface Settings {
+  deliveryRegion?: DeliveryRegion | null;
   network: NetworkSettings;
   backoffEnabled: boolean;
   locale: string;

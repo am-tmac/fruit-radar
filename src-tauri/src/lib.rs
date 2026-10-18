@@ -265,7 +265,7 @@ struct AppState {
     control: tokio::sync::Mutex<()>,
     admission: std::sync::Mutex<automation::Admission>,
     order_watch: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    orders: std::sync::Mutex<std::collections::HashSet<String>>,
+    orders: std::sync::Mutex<apw_core::config::NotifiedOrders>,
     catalog: Catalog,
     http: reqwest::Client,
     /// 设置的内存副本。有可用的持久化存储时，只在新设置成功落盘后更新。
@@ -1134,6 +1134,13 @@ fn watch_for_new_order(app: AppHandle) {
                         .lock()
                         .unwrap()
                         .insert(order.clone());
+                    let fresh = match fresh {
+                        Ok(fresh) => fresh,
+                        Err(error) => {
+                            let _ = app.emit(NOTICE_CHANNEL, format!("保存订单记录失败：{error}"));
+                            false
+                        }
+                    };
                     if fresh {
                         disarm_checkout_after_order(&app).await;
                         for attempt in 0..3 {
@@ -1659,6 +1666,7 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
             }
 
             let mut opened_destination = None;
+            let mut checkout_action = None;
             let hit_actions = checkout::hit_actions(&settings, target);
             if settings.stop_on_hit {
                 // 放到独立任务里停：引擎可能正等着往这个事件通道里发下一条事件，
@@ -1710,6 +1718,13 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
                         .unwrap()
                         .attempted(&target.locale, &target.part_number);
                 let lease = if bag_in_flight || bag_unknown { None } else { lease };
+                if hit_actions.checkout {
+                    checkout_action = Some(checkout_action_text(
+                        lease.is_some(),
+                        bag_in_flight,
+                        bag_unknown,
+                    ));
+                }
                 if ticket.is_some() || lease.is_some() {
                     // 加购和结账要等页面加载、走完整段流程，放进后台任务，
                     // 不能堵住事件泵。
@@ -1767,8 +1782,8 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
                     // 加购结果由后台任务单独报，这里只说一声已经开始。
                     actions.push("自动加购受去重与结账保护约束");
                 }
-                if hit_actions.checkout {
-                    actions.push("自动结账（结果单独报告）");
+                if let Some(action) = checkout_action {
+                    actions.push(action);
                 }
                 if let Some(destination) = opened_destination {
                     match destination {
@@ -1970,6 +1985,12 @@ pub fn run() {
                 });
             }
 
+            let orders = apw_core::config::runtime_dir("notified-orders.json")
+                .and_then(apw_core::config::NotifiedOrders::load)
+                .unwrap_or_else(|error| {
+                    notices.push(format!("读取订单记录失败，本次仅在内存去重：{error}"));
+                    apw_core::config::NotifiedOrders::default()
+                });
             app.manage(AppState {
                 watcher,
                 fetcher,
@@ -1977,7 +1998,7 @@ pub fn run() {
                 control: tokio::sync::Mutex::new(()),
                 admission: std::sync::Mutex::new(automation::Admission::default()),
                 order_watch: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                orders: std::sync::Mutex::new(std::collections::HashSet::new()),
+                orders: std::sync::Mutex::new(orders),
                 catalog,
                 http: reqwest::Client::new(),
                 settings: RwLock::new(settings),
@@ -2090,6 +2111,26 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review_checkout_action_text() {
+        assert_eq!(
+            super::checkout_action_text(true, false, false),
+            "自动结账（结果单独报告）"
+        );
+        assert_eq!(
+            super::checkout_action_text(false, false, false),
+            "已有结账在进行，本次跳过自动结账"
+        );
+        assert_eq!(
+            super::checkout_action_text(false, true, true),
+            "由正在进行的加购任务接着结账"
+        );
+        assert_eq!(
+            super::checkout_action_text(false, false, true),
+            "加购未受理，本次跳过自动结账"
+        );
+    }
+
     use super::{
         in_stock_notification_body, parse_delivery_localities, parse_watch_band_choices,
         parse_watch_band_sizes,
@@ -2297,5 +2338,17 @@ mod tests {
         assert_eq!(unsafe { libc::kill(late_pid, 0) }, -1);
         drop(held);
         drop(lease);
+    }
+}
+
+fn checkout_action_text(leased: bool, bag_in_flight: bool, bag_unknown: bool) -> &'static str {
+    if leased {
+        "自动结账（结果单独报告）"
+    } else if bag_in_flight {
+        "由正在进行的加购任务接着结账"
+    } else if bag_unknown {
+        "加购未受理，本次跳过自动结账"
+    } else {
+        "已有结账在进行，本次跳过自动结账"
     }
 }

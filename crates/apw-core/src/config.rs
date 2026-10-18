@@ -480,7 +480,17 @@ impl Settings {
         let mut kept: Vec<Target> = Vec::with_capacity(self.targets.len());
         let mut seen: std::collections::HashSet<crate::model::TargetKey> =
             std::collections::HashSet::with_capacity(self.targets.len());
-        for t in &self.targets {
+        for t in &mut self.targets {
+            t.locale = t.locale.trim().to_owned();
+            t.store_number = t.store_number.trim().to_owned();
+            t.part_number = t.part_number.trim().to_owned();
+            for part in [&mut t.companion_part, &mut t.kit_part] {
+                *part = part
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+            }
             // 用 trim 判空：手工编辑过的文件里全是空格的字段和空字符串一样发不出请求。
             if t.locale.trim().is_empty()
                 || t.store_number.trim().is_empty()
@@ -1025,6 +1035,40 @@ impl LegacySettings {
 mod tests {
     use super::*;
 
+    #[test]
+    fn review_target_whitespace_and_dedupe() {
+        let mut padded = 目标(" R683 ", " PART ");
+        padded.locale = " zh_CN ".into();
+        padded.companion_part = Some(" BAND ".into());
+        padded.kit_part = Some("  ".into());
+        let mut clean = 目标("R683", "PART");
+        clean.companion_part = Some("BAND".into());
+        let mut settings = Settings {
+            targets: vec![padded, clean.clone()],
+            ..Settings::default()
+        };
+        settings.normalize();
+        assert_eq!(settings.targets, vec![clean]);
+    }
+
+    #[test]
+    fn review_orders_persist_cap_and_dedupe() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orders.json");
+        let mut orders = NotifiedOrders::load(path.clone()).unwrap();
+        for n in 0..55 {
+            assert!(orders.insert(format!("W{n:08}")).unwrap());
+        }
+        let mut restored = NotifiedOrders::load(path.clone()).unwrap();
+        assert!(!restored.insert("W00000054".into()).unwrap());
+        let saved: Vec<String> = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.len(), 50);
+        assert_eq!(saved.first().unwrap(), "W00000005");
+        assert!(restored.insert("W00000000".into()).unwrap());
+        fs::write(&path, "broken").unwrap();
+        assert!(NotifiedOrders::load(path).is_err());
+    }
+
     fn 目标(store: &str, part: &str) -> Target {
         Target {
             locale: "zh_CN".into(),
@@ -1213,5 +1257,56 @@ mod tests {
         );
         // 新版必须和 Go 版分家，否则两个版本会互相覆盖对方的配置。
         assert_ne!(SETTINGS_FILE, LEGACY_SETTINGS_FILE);
+    }
+}
+
+/// 最近已处理的订单：与设置共用原子写入，避免重启后重复通知和关闭结账。
+#[derive(Default)]
+pub struct NotifiedOrders {
+    path: Option<PathBuf>,
+    orders: Vec<String>,
+}
+impl NotifiedOrders {
+    pub fn load(path: PathBuf) -> Result<Self, ConfigError> {
+        let orders: Vec<String> = match fs::read(&path) {
+            Ok(data) => serde_json::from_slice(&data).map_err(|source| ConfigError::Malformed {
+                path: path.clone(),
+                source,
+            })?,
+            Err(error) if error.kind() == ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(ConfigError::io("读取订单记录", &path, error)),
+        };
+        let mut recent = Vec::new();
+        for order in orders.into_iter().rev() {
+            if !recent.contains(&order) {
+                recent.push(order);
+            }
+            if recent.len() == 50 {
+                break;
+            }
+        }
+        recent.reverse();
+        Ok(Self {
+            path: Some(path),
+            orders: recent,
+        })
+    }
+
+    pub fn insert(&mut self, order: String) -> Result<bool, ConfigError> {
+        if self.orders.contains(&order) {
+            return Ok(false);
+        }
+        let mut next = self.orders.clone();
+        next.push(order);
+        if next.len() > 50 {
+            next.remove(0);
+        }
+        if let Some(path) = &self.path {
+            let data =
+                serde_json::to_vec(&next).map_err(|source| ConfigError::Encode { source })?;
+            write_atomically(path, &data)?;
+        }
+        self.orders = next;
+        Ok(true)
     }
 }

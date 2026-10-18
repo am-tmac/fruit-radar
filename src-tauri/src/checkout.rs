@@ -1475,6 +1475,9 @@ pub fn disarmed(current: &Settings) -> Settings {
 /// 已关闭的开关重新写成开启，下次开始监控就会再下一单。开关只能通过
 /// 专门的命令（[`with_switches`]）改。
 pub fn merge_ui_settings(current: &Settings, mut incoming: Settings) -> Settings {
+    if incoming.delivery_region.is_none() {
+        incoming.delivery_region = current.delivery_region.clone();
+    }
     incoming.checkout.enabled = current.checkout.enabled;
     incoming.checkout.place_order = current.checkout.place_order;
     incoming
@@ -1495,6 +1498,35 @@ pub fn with_switches(current: &Settings, enabled: Option<bool>, place_order: Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_merge_preserves_delivery_region() {
+        let region = apw_core::model::DeliveryRegion {
+            state: "上海".into(),
+            city: "上海".into(),
+            district: "普陀".into(),
+        };
+        let current = Settings {
+            delivery_region: Some(region.clone()),
+            ..Settings::default()
+        };
+        assert_eq!(
+            merge_ui_settings(&current, Settings::default()).delivery_region,
+            Some(region)
+        );
+        let incoming = Settings {
+            delivery_region: Some(apw_core::model::DeliveryRegion {
+                state: "北京".into(),
+                city: "北京".into(),
+                district: "朝阳".into(),
+            }),
+            ..Settings::default()
+        };
+        assert_eq!(
+            merge_ui_settings(&current, incoming.clone()).delivery_region,
+            incoming.delivery_region
+        );
+    }
 
     #[test]
     fn 结账地区按目标门店编号从目录读取() {

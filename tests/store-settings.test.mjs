@@ -60,7 +60,7 @@ async function setup() {
     if (command === "save_settings") persisted = { ...args.settings };
     if (command === "set_interval") persisted.intervalSeconds = Math.max(5, args.seconds);
     if (command === "set_targets") persisted.targets = args.targets;
-    if (command === "set_targets") return [];
+    if (command === "set_targets") return persisted.targets.map(target => ({ target }));
     if (command === "set_interval") return persisted.intervalSeconds;
     return { ...persisted };
   };
@@ -304,4 +304,13 @@ test("checkout switches use the dedicated command and a later full save keeps th
   await ctx.store.saveSettings({ pickupFirstName: "FixtureOther" });
   assert.equal(ctx.persisted().checkout.enabled, false);
   assert.equal(ctx.persisted().checkout.placeOrder, false);
+});
+
+test("Watch settings retain backend hydrated companion and kit parts", async () => {
+  const { store } = await setup();
+  const targets = [{ locale: "zh_CN", storeNumber: "R683", partNumber: "WATCH" }, { locale: "zh_CN", storeNumber: "R683", partNumber: "PHONE" }];
+  const hydrated = targets.map((target, i) => i ? target : { ...target, companionPart: "BAND", kitPart: "KIT" });
+  invoke = async command => command === "set_targets" ? hydrated.map(target => ({ target })) : undefined;
+  assert.equal(await store.setTargets(targets), true);
+  assert.deepEqual(store.watcherStore.getSnapshot().settings.targets, hydrated);
 });
