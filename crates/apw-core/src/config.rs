@@ -30,6 +30,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{DeliveryRegion, REGIONS, Target, region_by_locale};
+use crate::notify::BarkLevel;
 
 /// 检测到有货时自动打开的 Apple 页面。
 ///
@@ -292,6 +293,15 @@ pub fn checkout_product_key(target: &Target) -> String {
 #[serde(rename_all = "camelCase", default)]
 pub struct CheckoutSettings {
     pub enabled: bool,
+    /// 成功停在「查看订单」页后是否关闭自动结账（移植自上游 v1.0.23）。默认开启，
+    /// 旧配置保持原来的单次行为。无论这里怎么选，一旦已点「立即下单」（读到或没读到
+    /// 订单号），总开关与「自动点立即下单」都会一起关闭：这是本 fork 的防重复下单底线。
+    pub disable_after_success: bool,
+    /// 按到货型号加购结账（移植自上游 v1.0.23）：开启后所有中国大陆监控型号到货都能
+    /// 触发；结账先确认专属购物袋为空，再把本次到货型号加 1 件并核对零件号与数量。
+    /// 提交前失败会移除本次商品并确认空袋。旧配置保持关闭，继续使用预先准备的购物袋
+    /// 和指定商品。与顶层的 [`Settings::auto_add_to_bag`]（到货只加购）是两回事。
+    pub auto_add_to_bag: bool,
     pub payment: CheckoutPayment,
     /// 分期方案名称，按结账页上的名称匹配，例如「招商银行」「花呗分期」。
     pub installment_bank: String,
@@ -301,8 +311,8 @@ pub struct CheckoutSettings {
     /// 结账页默认选中的门店（离取货地区最近的有货门店）可取货时，直接在那里取货，
     /// 即使它不是监控到货的那一家。
     pub accept_nearest_store: bool,
-    /// 要下单的商品（[`checkout_product_key`]）。只有它到货才会触发结账，购物袋里
-    /// 放的也必须是它。留空且监控列表里只有一件商品时，自动认定为那一件。
+    /// 预先准备购物袋模式的指定商品（[`checkout_product_key`]）。自动加购时忽略，
+    /// 否则只有它到货才触发。留空且只有一种商品时自动认定为那一件。
     pub product: String,
 }
 
@@ -310,6 +320,8 @@ impl Default for CheckoutSettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            disable_after_success: true,
+            auto_add_to_bag: false,
             payment: CheckoutPayment::Alipay,
             installment_bank: "招商银行".into(),
             installment_periods: 24,
@@ -342,6 +354,32 @@ pub fn normalized_id_suffix(raw: &str) -> String {
         .collect()
 }
 
+/// Bark 推送的增强参数。
+///
+/// 全部字段都有「不改变旧行为」的默认值：等级不指定、铃声为空、音量为
+/// `None`、不持续响铃。只有用户显式设置过的项才会进入推送请求。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BarkOptions {
+    /// 通知中断级别；`default` 表示不指定（等同于 Bark 默认的 `active`）。
+    pub level: BarkLevel,
+    /// 铃声名；空表示用 Bark 默认铃声。
+    pub sound: String,
+    /// 重要警告（critical）的通知音量 0-10；`None` 表示不指定。
+    pub volume: Option<u8>,
+    /// 持续响铃（`call=1`）：重复播放铃声约 30 秒。
+    pub call: bool,
+}
+
+impl BarkOptions {
+    fn normalize(&mut self) {
+        self.sound = self.sound.trim().to_string();
+        if let Some(volume) = &mut self.volume {
+            *volume = (*volume).min(10);
+        }
+    }
+}
+
 /// 持久化的用户设置。
 ///
 /// 字段名跨 IPC 边界要和前端对齐，所以统一小驼峰，与 [`Target`]、
@@ -365,6 +403,8 @@ pub struct Settings {
     pub bark_url: String,
     /// 按商品零件号覆盖默认 Bark；同一型号在不同门店共用一条路由。
     pub product_bark_urls: BTreeMap<String, String>,
+    /// Bark 推送的增强参数。
+    pub bark_options: BarkOptions,
     /// 有货时是否播放提示音。
     pub sound_enabled: bool,
     /// 有货时自动打开的页面；旧字段 `openBagOnHit` 通过别名兼容。
@@ -427,6 +467,7 @@ impl Default for Settings {
             interval_seconds: DEFAULT_INTERVAL_SECONDS,
             bark_url: String::new(),
             product_bark_urls: BTreeMap::new(),
+            bark_options: BarkOptions::default(),
             sound_enabled: true,
             open_on_hit: OpenOnHit::default(),
             network: NetworkSettings::default(),
@@ -517,17 +558,22 @@ impl Settings {
             active_parts.contains(part_number) && !bark_url.is_empty()
         });
 
+        self.bark_options.normalize();
         self.checkout.normalize();
-        // 选中的商品不在监控列表里了就清掉；没有明确的下单商品时自动结账不能开着，
-        // 否则会变成「哪件先到货就拿哪件去撞购物袋」。
-        if !self.checkout.product.is_empty()
+        // 旧模式仍要求明确的单商品；自动加购模式由每次到货的目标决定商品。
+        if !self.checkout.auto_add_to_bag
+            && !self.checkout.product.is_empty()
             && !self.checkout_candidates().contains(&self.checkout.product)
         {
             self.checkout.product.clear();
             // 选定的商品没了就整体停用，不让剩下的某一件悄悄顶替它继续自动下单。
             self.checkout.enabled = false;
         }
-        if self.checkout_product().is_none() {
+        if !self
+            .targets
+            .iter()
+            .any(|target| self.is_checkout_target(target))
+        {
             self.checkout.enabled = false;
         }
     }
@@ -562,7 +608,9 @@ impl Settings {
     /// 这条监控项到货时是否应当触发自动结账。
     pub fn is_checkout_target(&self, target: &Target) -> bool {
         target.locale == CHECKOUT_LOCALE
-            && self.checkout_product().as_deref() == Some(checkout_product_key(target).as_str())
+            && (self.checkout.auto_add_to_bag
+                || self.checkout_product().as_deref()
+                    == Some(checkout_product_key(target).as_str()))
     }
 
     /// 取货人证件后四位是否已填完整。没填完时自动结账必然卡在取货信息页。
@@ -1006,6 +1054,7 @@ impl LegacySettings {
                 .unwrap_or(fallback.interval_seconds),
             bark_url: self.bark_url.unwrap_or(fallback.bark_url),
             product_bark_urls: BTreeMap::new(),
+            bark_options: fallback.bark_options,
             sound_enabled: self.sound_enabled.unwrap_or(fallback.sound_enabled),
             open_on_hit: match self.open_bag_on_hit {
                 Some(true) => OpenOnHit::Bag,

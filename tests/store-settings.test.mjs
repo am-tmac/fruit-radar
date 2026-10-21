@@ -26,13 +26,14 @@ const defaults = {
   locale: "zh_CN", targets: [], intervalSeconds: 30,
   barkUrl: "https://example.invalid/old", soundEnabled: true, openOnHit: "bag",
   productBarkUrls: {},
+  barkOptions: { level: "default", sound: "", volume: null, call: false },
   network: { mode: "system", clash: { controller: "http://127.0.0.1:9097", secret: "", group: "水果雷达", proxyPort: 7899, nodeFilter: "", pinnedNode: "DIRECT" } },
   backoffEnabled: true,
   autoAddToBag: false, bagApplecare: false,
   pickupLastName: "", pickupFirstName: "", pickupEmail: "", pickupPhone: "", pickupIdLast4: "",
   stopOnHit: false,
   checkout: {
-    enabled: false, payment: "alipay", installmentBank: "招商银行", installmentPeriods: 24,
+    enabled: false, disableAfterSuccess: true, autoAddToBag: false, payment: "alipay", installmentBank: "招商银行", installmentPeriods: 24,
     placeOrder: false, acceptNearestStore: false, product: "",
   },
 };

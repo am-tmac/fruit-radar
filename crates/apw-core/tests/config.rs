@@ -15,10 +15,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::os::unix::fs::PermissionsExt;
 
 use apw_core::config::{
-    CheckoutPayment, CheckoutSettings, ConfigError, DEFAULT_INTERVAL_SECONDS, MAX_SETTINGS_BYTES,
-    OpenOnHit, Settings, SettingsStore, normalized_id_suffix,
+    BarkOptions, CheckoutPayment, CheckoutSettings, ConfigError, DEFAULT_INTERVAL_SECONDS,
+    MAX_SETTINGS_BYTES, OpenOnHit, Settings, SettingsStore, normalized_id_suffix,
 };
 use apw_core::model::Target;
+use apw_core::notify::BarkLevel;
 
 /// 用完自动删掉的临时目录。
 ///
@@ -97,6 +98,12 @@ fn 样例设置() -> Settings {
         product_bark_urls: [("MG724CH/A".into(), "https://api.day.app/friend".into())]
             .into_iter()
             .collect(),
+        bark_options: BarkOptions {
+            level: BarkLevel::Critical,
+            sound: "alarm".into(),
+            volume: Some(8),
+            call: true,
+        },
         sound_enabled: false,
         open_on_hit: OpenOnHit::Product,
         network: apw_core::config::NetworkSettings::default(),
@@ -111,6 +118,8 @@ fn 样例设置() -> Settings {
         stop_on_hit: true,
         checkout: CheckoutSettings {
             enabled: true,
+            disable_after_success: false,
+            auto_add_to_bag: false,
             payment: CheckoutPayment::Installment,
             installment_bank: "招商银行".into(),
             installment_periods: 24,
@@ -617,6 +626,7 @@ fn 设置的线上格式是小驼峰() {
         "intervalSeconds",
         "barkUrl",
         "productBarkUrls",
+        "barkOptions",
         "soundEnabled",
         "openOnHit",
         "network",
@@ -642,6 +652,8 @@ fn 设置的线上格式是小驼峰() {
     let checkout = obj["checkout"].as_object().expect("checkout 应当是对象");
     for key in [
         "enabled",
+        "disableAfterSuccess",
+        "autoAddToBag",
         "payment",
         "installmentBank",
         "installmentPeriods",
@@ -663,9 +675,37 @@ fn 设置的线上格式是小驼峰() {
             "checkout 不该有重复联系人字段 {key}"
         );
     }
-    assert_eq!(checkout.len(), 7);
+    assert!(
+        !checkout.contains_key("disable_after_success"),
+        "不该有蛇形字段"
+    );
+    assert!(!checkout.contains_key("auto_add_to_bag"), "不该有蛇形字段");
+    // 上游 v1.0.23 的 Apple ID 自动登录不移植：设置里不能出现任何登录凭据字段。
+    for key in ["login", "account", "password", "appleId", "checkoutLogin"] {
+        assert!(!checkout.contains_key(key), "checkout 不该有登录字段 {key}");
+        assert!(!obj.contains_key(key), "设置不该有登录字段 {key}");
+    }
+    assert_eq!(
+        checkout.get("disableAfterSuccess"),
+        Some(&serde_json::json!(false))
+    );
+    assert_eq!(
+        checkout.get("autoAddToBag"),
+        Some(&serde_json::json!(false))
+    );
+    assert_eq!(checkout.len(), 9);
     assert_eq!(checkout["payment"], "installment");
-    assert_eq!(obj.len(), 19);
+    assert_eq!(
+        obj.get("barkOptions"),
+        Some(&serde_json::json!({
+            "level": "critical",
+            "sound": "alarm",
+            "volume": 8,
+            "call": true
+        }))
+    );
+    assert!(!obj.contains_key("bark_options"), "不该有蛇形字段");
+    assert_eq!(obj.len(), 20);
 }
 
 #[test]
@@ -749,6 +789,40 @@ fn old_settings_keep_system_network_and_backoff_and_opt_in_roundtrips() {
 }
 
 #[test]
+fn 旧设置没有bark增强参数时全部保持默认() {
+    let settings: Settings =
+        serde_json::from_str(r#"{"locale":"zh_CN","intervalSeconds":30}"#).expect("旧设置应可读取");
+    assert_eq!(settings.bark_options, BarkOptions::default());
+    assert_eq!(settings.bark_options.level, BarkLevel::Default);
+    assert!(settings.bark_options.sound.is_empty());
+    assert_eq!(settings.bark_options.volume, None);
+    assert!(!settings.bark_options.call);
+}
+
+#[test]
+fn 铃声与音量设置会被规范化() {
+    let mut settings = Settings::default();
+    settings.bark_options.volume = Some(25); // 音量封顶 10
+    settings.bark_options.sound = "  alarm  ".into(); // 铃声去空白
+    settings.normalize();
+    assert_eq!(settings.bark_options.volume, Some(10));
+    assert_eq!(settings.bark_options.sound, "alarm");
+}
+
+#[test]
+fn bark等级按小驼峰与蛇形各自序列化() {
+    // 设置文件里用 snake_case（time_sensitive），推送请求里才是 Bark 的 timeSensitive。
+    let value = serde_json::to_value(BarkOptions {
+        level: BarkLevel::TimeSensitive,
+        ..BarkOptions::default()
+    })
+    .unwrap();
+    assert_eq!(value["level"], "time_sensitive");
+    let back: BarkOptions = serde_json::from_value(value).unwrap();
+    assert_eq!(back.level, BarkLevel::TimeSensitive);
+}
+
+#[test]
 fn 自动结账默认关闭_不自动下单_到货不暂停() {
     let settings = Settings::default();
     let checkout = &settings.checkout;
@@ -764,6 +838,50 @@ fn 自动结账默认关闭_不自动下单_到货不暂停() {
     huabei.checkout.installment_periods = 24;
     huabei.normalize();
     assert_eq!(huabei.checkout.installment_periods, 12);
+    assert!(checkout.disable_after_success, "默认成功后关闭，兼容旧行为");
+    assert!(!checkout.auto_add_to_bag, "按到货型号加购结账默认关闭");
+}
+
+#[test]
+fn 成功后关闭选项兼容旧配置且保留用户持续结账选择() {
+    let old: CheckoutSettings = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+    assert!(old.disable_after_success);
+    assert!(!old.auto_add_to_bag, "旧配置继续使用预先准备的购物袋");
+    let mut settings = Settings::default();
+    settings.checkout.disable_after_success = false;
+    settings.normalize();
+    let loaded: Settings =
+        serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+    assert!(!loaded.checkout.disable_after_success);
+}
+
+#[test]
+fn 按到货型号加购结账允许不同型号到货且仍排除其他地区() {
+    let mut overseas = 目标("R409", "MG724ZP/A");
+    overseas.locale = "zh_HK".into();
+    let mut settings = Settings {
+        targets: vec![
+            目标("R683", "MG724CH/A"),
+            目标("R448", "MG0A4CH/A"),
+            overseas,
+        ],
+        ..Default::default()
+    };
+    settings.checkout.auto_add_to_bag = true;
+    settings.checkout.enabled = true;
+    // 即使保留了旧模式的单商品选择，也不能挡住新模式中的另一件商品。
+    settings.checkout.product = "MG724CH/A||".into();
+    settings.normalize();
+    assert!(settings.checkout.enabled);
+    assert!(settings.is_checkout_target(&settings.targets[0]));
+    assert!(settings.is_checkout_target(&settings.targets[1]));
+    assert!(!settings.is_checkout_target(&settings.targets[2]));
+    settings.targets.remove(0);
+    settings.normalize();
+    assert!(settings.checkout.enabled);
+    settings.targets.remove(0);
+    settings.normalize();
+    assert!(!settings.checkout.enabled, "没有中国大陆监控项时关闭");
 }
 
 #[test]

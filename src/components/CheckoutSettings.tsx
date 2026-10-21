@@ -24,7 +24,8 @@ function periodsFor(bank: string): readonly number[] {
 
 function summarize(checkout: Checkout): string {
   if (!checkout.enabled) return "未开启";
-  return checkout.placeOrder ? "到货后自动提交订单" : "到货后停在查看订单页";
+  const mode = checkout.autoAddToBag ? "按到货型号加购，" : "";
+  return mode + (checkout.placeOrder ? "到货后自动提交订单" : "到货后停在查看订单页");
 }
 
 /** 与后端 checkout_product_key 的规则一致：同一件商品在多家门店的监控项共用一个标识。 */
@@ -59,6 +60,8 @@ export function CheckoutSettings({
   const chosen = products.length === 1
     ? products[0]!.key
     : products.some((product) => product.key === checkout.product) ? checkout.product : "";
+  // 按到货型号加购时，任意一件中国大陆商品都能触发，不需要事先选定。
+  const targetReady = checkout.autoAddToBag ? products.length > 0 : !!chosen;
   const [busy, setBusy] = useState(false);
   const bankOptions = INSTALLMENT_BANKS.includes(checkout.installmentBank) || !checkout.installmentBank
     ? INSTALLMENT_BANKS
@@ -82,15 +85,17 @@ export function CheckoutSettings({
             id="checkout-enabled"
             aria-label="到货后自动结账"
             checked={checkout.enabled}
-            disabled={(!suffixReady || !chosen) && !checkout.enabled}
+            disabled={(!suffixReady || !targetReady) && !checkout.enabled}
             onCheckedChange={(enabled) => void setCheckoutSwitches({ enabled })}
           />
         </div>
         <p className="text-[11px] leading-4 break-words text-muted-foreground">
-          {autoAddToBag
-            ? "到货后先在买家窗口自动加购，再从购物袋开始结账。购物袋里必须只有这一件商品、数量为 1。"
-            : "未开启自动加购：到货后直接从买家窗口的购物袋开始结账，请提前把这件商品放进购物袋。"}
-          成功执行一次（或检测到新订单）后会连同「自动点立即下单」一起关闭并保存，需要时再手动开启。付款始终由你自己完成。
+          {checkout.autoAddToBag
+            ? "到货后在买家窗口按本次到货型号加购 1 件，核对零件号与数量后结账。"
+            : autoAddToBag
+              ? "到货后先在买家窗口自动加购，再从购物袋开始结账。购物袋里必须只有这一件商品、数量为 1。"
+              : "未开启自动加购：到货后直接从买家窗口的购物袋开始结账，请提前把这件商品放进购物袋。"}
+          已点「立即下单」或检测到新订单时，会连同「自动点立即下单」一起关闭并保存。付款始终由你自己完成。
         </p>
         {!suffixReady ? (
           <p role="alert" className="text-[11px] leading-4 break-words text-destructive">
@@ -98,7 +103,42 @@ export function CheckoutSettings({
           </p>
         ) : null}
 
-        <div className="field-group">
+        <div className="setting-row">
+          <Label htmlFor="checkout-auto-add" className="text-[13.5px] font-normal">按到货型号自动加入购物袋</Label>
+          <Switch
+            id="checkout-auto-add"
+            aria-label="按到货型号自动加入购物袋"
+            checked={checkout.autoAddToBag}
+            onCheckedChange={(value) => save({ autoAddToBag: value })}
+          />
+        </div>
+        <p className="text-[11px] leading-4 break-words text-muted-foreground">
+          {checkout.autoAddToBag ? (
+            <>
+              <strong className="font-medium text-foreground">开启前建议先「打开买家窗口」手动清空购物袋，减少失败清理的等待。</strong>
+              <br />
+              监控列表里的中国大陆型号都能触发，同一时间只处理一件。已有本次型号 1 件时沿用；其他商品或数量不符会结束本轮并清空购物袋。提交前失败会移除本次商品、确认空袋后关闭买家窗口并继续监控；清理没完成时下次先继续清理，自动结账保持开启。请勿在这个购物袋保存其他商品；需另配表带的 Watch 暂不支持。
+            </>
+          ) : "关闭时使用事先准备的购物袋，只对下面选定的商品结账。"}
+        </p>
+
+        <div className="setting-row">
+          <Label htmlFor="checkout-disable-after-success" className="text-[13.5px] font-normal">停在查看订单页后关闭自动结账</Label>
+          <Switch
+            id="checkout-disable-after-success"
+            aria-label="停在查看订单页后关闭自动结账"
+            checked={checkout.disableAfterSuccess}
+            onCheckedChange={(value) => save({ disableAfterSuccess: value })}
+          />
+        </div>
+        <p className="text-[11px] leading-4 break-words text-muted-foreground">
+          {checkout.disableAfterSuccess
+            ? "到达「查看订单」页后关闭上方总开关。"
+            : "到达「查看订单」页后保持总开关开启；监控继续运行时，持续有货会再次结账并切换买家窗口当前页面。"}
+          已点「立即下单」（读到或没读到订单号）或提交结果不明时，总是关闭自动结账并保留页面，避免重复下单。Apple 要求重新登录时停下并保留页面，本应用不保存 Apple ID 密码、也不会替你登录。
+        </p>
+
+        {!checkout.autoAddToBag ? <div className="field-group">
           <Label htmlFor="checkout-product" className="control-label">要下单的商品</Label>
           {products.length > 1 ? (
             <Select value={chosen} onValueChange={(product) => save({ product })}>
@@ -125,7 +165,7 @@ export function CheckoutSettings({
               只有这件商品到货才会结账；开启自动结账后，自动加购也只加这一件。其他商品到货照常提醒。
             </p>
           )}
-        </div>
+        </div> : null}
 
         <div className="field-group">
           <Label htmlFor="checkout-payment" className="control-label">付款方式</Label>
@@ -215,7 +255,7 @@ export function CheckoutSettings({
           type="button"
           variant="outline"
           className="h-9 rounded-[7px] border-hair-strong"
-          disabled={busy || !suffixReady || !chosen}
+          disabled={busy || !suffixReady || !targetReady}
           onClick={async () => {
             setBusy(true);
             await testCheckout();
@@ -226,7 +266,9 @@ export function CheckoutSettings({
           试跑到查看订单页（不下单）
         </Button>
         <p className="text-[11px] leading-4 break-words text-muted-foreground">
-          首次使用先用「打开买家窗口」登录 Apple 账户，把要买的商品放进购物袋并手动走一次结账。试跑用「要下单的商品」和它第一条监控项的门店，不会提交订单。
+          {checkout.autoAddToBag
+            ? "先用「打开买家窗口」登录 Apple 账户并留空购物袋。试跑会加购监控列表里第一件中国大陆商品，停在「查看订单」页，不会提交订单；试跑失败保留页面供检查，不会清理购物袋。"
+            : "首次使用先用「打开买家窗口」登录 Apple 账户，把要买的商品放进购物袋并手动走一次结账。试跑用「要下单的商品」和它第一条监控项的门店，不会提交订单。"}
         </p>
       </div>
     </CollapsiblePanel>

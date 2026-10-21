@@ -395,6 +395,21 @@ impl BagSession {
         }
     }
 
+    /// 自动结账在提交前失败后关闭买家窗口（移植自上游 v1.0.23）：先让浏览器正常
+    /// 退出以保存登录 Cookie，资料目录保留，下次到货由 [`ensure_session`] 重新打开。
+    /// 本应用启动的进程再按 [`BuyerProcess::terminate`] 兜底回收（放进阻塞线程，
+    /// 不卡异步运行时）。接管的已有实例只发 `Browser.close`。
+    pub async fn close_gracefully(&mut self) {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            self.command("Browser.close", json!({})),
+        )
+        .await;
+        if let Some(child) = self.child.clone() {
+            let _ = tokio::task::spawn_blocking(move || child.terminate()).await;
+        }
+    }
+
     /// 关掉本应用启动的买家浏览器。用户显式要求或应用退出时调用。
     pub fn shutdown(&mut self) {
         if let Some(child) = self.child.as_ref() {

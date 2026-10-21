@@ -143,6 +143,21 @@ export interface CatalogRefresh {
   errors: string[];
 }
 
+/** Bark 推送的中断级别，与 Rust 侧 `BarkLevel` 一一对应（移植自上游 v1.0.23）。 */
+export type BarkLevel = "default" | "active" | "time_sensitive" | "passive" | "critical";
+
+/** Bark 推送的增强参数，与 Rust 侧 `BarkOptions` 一一对应。全部默认时请求与旧版一致。 */
+export interface BarkOptions {
+  /** 通知等级；default 表示不指定。 */
+  level: BarkLevel;
+  /** 铃声名；空表示用 Bark 默认铃声。 */
+  sound: string;
+  /** 重要警告（critical）的通知音量 0-10；null 表示不指定。 */
+  volume: number | null;
+  /** 持续响铃：重复播放铃声约 30 秒。 */
+  call: boolean;
+}
+
 /** 自动结账使用的付款方式，与 Rust 侧 `CheckoutPayment` 一一对应。 */
 export type CheckoutPayment = "alipay" | "wechat" | "installment";
 
@@ -155,6 +170,10 @@ export const INSTALLMENT_PERIODS = [1, 3, 6, 12, 24] as const;
  */
 export interface CheckoutSettings {
   enabled: boolean;
+  /** 停在「查看订单」页后关闭自动结账（默认开启）。已点「立即下单」时无论如何都会关闭。 */
+  disableAfterSuccess: boolean;
+  /** 按到货型号自动加购后结账：监控列表中的中国大陆型号都能触发。 */
+  autoAddToBag: boolean;
   payment: CheckoutPayment;
   /** 分期方案名称，按结账页上的名称匹配。 */
   installmentBank: string;
@@ -163,7 +182,7 @@ export interface CheckoutSettings {
   placeOrder: boolean;
   /** 结账页默认选中的最近有货门店可取货时直接用它。 */
   acceptNearestStore: boolean;
-  /** 要下单的商品标识（见 checkoutProductKey）。留空且只监控一件商品时自动认定为那一件。 */
+  /** 预先准备购物袋模式的商品标识（见 checkoutProductKey）；按到货型号加购时忽略。 */
   product: string;
 }
 
@@ -183,6 +202,7 @@ export interface Settings {
   /** 按商品零件号覆盖默认 Bark；同一型号在不同门店共用。 */
   productBarkUrls: Record<string, string>;
   barkUrl: string;
+  barkOptions: BarkOptions;
   soundEnabled: boolean;
   openOnHit: OpenOnHit;
   /** 有货时在专属的买家浏览器里自动把商品加入购物袋（不结账）。 */

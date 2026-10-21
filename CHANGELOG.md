@@ -1,5 +1,20 @@
 # 更新记录
 
+## 1.3.0
+
+选择性移植上游 v1.0.23（`b48a09f`），逐文件三方合并，未 `git merge upstream`。
+
+- Bark 推送增强（`3fb1f9f`）：设置新增 `barkOptions`（通知等级、铃声、重要警告音量 0–10、持续响铃），全部默认时请求与旧版一致；界面在「默认 Bark 推送」下方。到货提醒改由后台单一队列逐条发送，不再在事件循环里等 Bark 超时或提示音播完。
+- 按到货型号加购结账（`2ea93d3`）：`checkout.autoAddToBag`（默认关闭，旧配置保持预先准备购物袋）。先确认买家窗口购物袋为空，再加本次到货型号 1 件（选无折抵、无 AppleCare，用真实鼠标事件点一次），核对零件号与数量后结账；查看订单页再核对零件号。需另配表带的型号不支持。
+- 提交前失败清理（`2ea93d3`、`787eebf`/`049fa2c`、`7c03d47`）：可重试失败后移除本次商品并刷新确认空袋，再关闭买家窗口（资料目录保留）；清理未完成时下次先继续清理，无固定重试上限。「立即下单」结果不明（含点击连接报错）与要求登录时不清理、不重试，保留页面；只有脚本明确返回「未点击」时下单才算可重试。试跑失败保留现场。
+- 单一结账名额：结账租约持有到开关写回、暂停决定之后才释放，多型号同时到货不会排队下两单。
+- `checkout.disableAfterSuccess`（`5eb1675`，默认开启）：控制停在「查看订单」页后是否关闭自动结账。本 fork 保留：已点「立即下单」或检测到新订单时两个开关一律关闭。
+- 修复「到货后暂停监控」截断自动结账重试：开着自动结账时，结账完成或提交结果不明后才暂停。
+- 购物袋 / 查看订单 / 结账步骤识别可见错误提示（`checkout_page_errors.js`），禁用的结账、下单按钮不当作就绪。
+- 设置新增字段的确切 camelCase 断言：顶层 20 个字段（+`barkOptions`），checkout 9 个字段（+`disableAfterSuccess`、`autoAddToBag`），并断言不存在任何登录凭据字段。
+- **未移植：Apple ID 自动重新登录（会把账号密码明文保存在 `checkout-login.json`）**，包括 `checkout_login.rs`、`checkout_sign_in.js`、登录设置界面、`tests/checkout-sign-in.test.mjs`、对应 README/CHANGELOG 段落与 `.gitignore` 条目。遇到登录页仍停下交给用户。
+- 未移植：上游 `ChromiumSession::close` 与专用结账浏览器测试（本 fork 结账跑在买家窗口 `BagSession`，改用 `BagSession::close_gracefully`）、`APW_CHECKOUT_AUDIT_PATH` 审计日志、`APW_MONITOR_AUTOSTART` 自动开始（违背手动开始）、上游版本号/品牌/CI/`release.yml`（`e2270ef`）。
+
 ## 1.2.1
 
 - 仅在下单确认页识别有效 W 订单号，避免未知订单及历史订单误触发提醒、关闭自动结账。

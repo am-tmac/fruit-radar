@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use apw_core::catalog::Catalog;
 use apw_core::config::{ClashSettings, MIN_INTERVAL_SECONDS, OpenOnHit, Settings, SettingsStore};
 use apw_core::model::{Category, Product, REGIONS, Store, Target, region_by_locale};
-use apw_core::notify::{Bark, Multi, Notification, Notifier, Sound};
+use apw_core::notify::{Bark, BarkPush, Multi, Notification, Notifier, Sound};
 use apw_core::watcher::{Event, TargetState, Watcher, WatcherConfig};
 use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
@@ -1312,7 +1312,15 @@ async fn dispatch_notification(
             .unwrap_or_default();
         // Bark 每次现构造：地址是用户随时可改的设置项，缓存实例会在改完地址后
         // 继续往旧地址推。共享的 http 客户端一并传进去，连接池仍然复用。
-        channels.push(Bark::new(bark_url.to_owned(), http));
+        // 推送增强参数（等级、铃声、音量、持续响铃）移植自上游 v1.0.23；全部默认时
+        // 请求与旧版完全一致。
+        let push = BarkPush {
+            level: settings.bark_options.level,
+            sound: settings.bark_options.sound.clone(),
+            volume: settings.bark_options.volume,
+            call: settings.bark_options.call,
+        };
+        channels.push(Bark::new(bark_url.to_owned(), http).with_push(push));
     }
     if channels.is_empty() {
         return Ok(());
@@ -1354,15 +1362,20 @@ async fn checkout_in_buyer_window(
 ) -> Result<CheckoutOutcome, checkout::CheckoutError> {
     let state = app.state::<AppState>();
     let mut guard = state.bag.lock().await;
-    checkout_in_buyer_window_locked(app, lease, target, place_order, &mut guard).await
+    checkout_in_buyer_window_locked(app, lease, target, place_order, false, &mut guard).await
 }
 
 /// 同上，调用方已持有买家会话锁。
+///
+/// `on_hit` 为真表示到货后的自动结账：按到货型号加购模式下提交前失败会清空专属
+/// 购物袋；可以重试的失败（[`checkout::CheckoutError::can_retry`]）之后关闭买家
+/// 窗口，资料目录保留，下次到货重新打开。试跑（`on_hit = false`）保留失败现场。
 async fn checkout_in_buyer_window_locked(
     app: &AppHandle,
     lease: &checkout::CheckoutLease,
     target: &Target,
     place_order: bool,
+    on_hit: bool,
     guard: &mut Option<bag::BagSession>,
 ) -> Result<CheckoutOutcome, checkout::CheckoutError> {
     let browser_error = |message: String| checkout::CheckoutError {
@@ -1391,8 +1404,26 @@ async fn checkout_in_buyer_window_locked(
             );
         }
     };
-    let result = state.checkout.run(lease, session, &plan, &progress).await;
-    if session.current_url().await.is_err() {
+    let result = if on_hit {
+        state
+            .checkout
+            .run_on_hit(lease, session, &plan, &progress)
+            .await
+    } else {
+        state.checkout.run(lease, session, &plan, &progress).await
+    };
+    if on_hit
+        && !state.checkout.is_cancelled()
+        && result
+            .as_ref()
+            .is_err_and(|error| error.can_retry() && error.stage != checkout::Stage::Browser)
+    {
+        // 提交前失败：关闭本次下单页面，等下一次有货重新打开购物袋。提交结果不明
+        // 或要求登录时不会走到这里，页面原样保留给用户。
+        session.close_gracefully().await;
+        *guard = None;
+        progress("自动结账：已关闭本次买家窗口，等待下一次有货".into());
+    } else if session.current_url().await.is_err() {
         // 连接已经断了（窗口被关、进程退出），下次重新接。
         *guard = None;
     } else if result
@@ -1407,10 +1438,14 @@ async fn checkout_in_buyer_window_locked(
 }
 
 /// 结账结束：按需关闭自动结账、通知界面、推送提醒并开始盯订单。
+///
+/// `lease` 一直持有到开关写回、暂停决定之后才释放（移植自上游 v1.0.23 的「单一
+/// 结账名额」）：多个型号同时到货时，第二次结账不能在上一单的开关关闭前开始。
 async fn finish_checkout(
     app: &AppHandle,
     target: &Target,
     result: Result<CheckoutOutcome, checkout::CheckoutError>,
+    lease: Option<checkout::CheckoutLease>,
 ) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
@@ -1432,8 +1467,28 @@ async fn finish_checkout(
                     let _ = app.emit(NOTICE_CHANNEL, format!("关闭自动结账开关失败：{err}"));
                 }
             }
+        } else if result.is_ok() && current.checkout.enabled {
+            let _ = app.emit(
+                NOTICE_CHANNEL,
+                "自动结账：按设置保持开启，监控继续运行时后续有货会再次结账。",
+            );
         }
     }
+    // 「到货后暂停监控」开着自动结账时，等结账完成或需要确认订单结果后才暂停；
+    // 可重试的失败不暂停，免得截断后续重试。
+    if checkout::should_pause_monitoring(&state.settings_snapshot(), Some(&result))
+        && pause_after_hit(
+            &state.watcher,
+            &state.control,
+            &state.auto_paused,
+            &state.exit_barrier,
+        )
+        .await
+    {
+        remember_running(false);
+        let _ = app.emit(NOTICE_CHANNEL, "本次自动结账已结束，已按设置暂停监控。");
+    }
+    drop(lease);
     let settings = state.settings_snapshot();
     let bark_url = settings.bark_url_for(target).to_owned();
     let (title, body) = match &result {
@@ -1470,9 +1525,26 @@ async fn finish_checkout(
             "提交订单时出错，请确认结果",
             format!("{error}。订单可能已经生成，请在买家窗口里确认。自动结账已关闭。"),
         ),
+        Err(error) if error.stage == checkout::Stage::SignIn => (
+            "Apple 要求重新登录",
+            format!(
+                "{error}。已保留页面，自动结账保持开启；本应用不保存 Apple ID 密码，也不会替你登录。"
+            ),
+        ),
+        Err(error) if error.stage == checkout::Stage::BagCleanup => (
+            "购物袋清理将继续重试",
+            format!(
+                "{error}。自动结账保持开启；下次有货先继续清理，确认空袋后才加购，不叠加失败商品。"
+            ),
+        ),
+        Err(error) if error.stage == checkout::Stage::Browser => {
+            ("自动结账没有完成", format!("{error}。请检查买家窗口。"))
+        }
         Err(error) => (
             "自动结账没有完成",
-            format!("{error}。请在买家窗口里手动继续。"),
+            format!(
+                "{error}。已关闭本次买家窗口；监控继续运行时，下次确认有货会重新打开购物袋尝试。"
+            ),
         ),
     };
     let body = checkout::redact_contact(&body, &settings);
@@ -1543,6 +1615,7 @@ async fn automate_hit(
                 lease,
                 target,
                 settings.checkout.place_order,
+                true,
                 guard,
             )
             .await)
@@ -1579,13 +1652,13 @@ async fn automate_hit(
         }
         _ => {}
     }
-    drop(lease);
     match checkout_result {
-        Some(Ok(result)) => finish_checkout(&app, &target, result).await,
+        Some(Ok(result)) => finish_checkout(&app, &target, result, lease).await,
         Some(Err(notice)) => {
+            drop(lease);
             let _ = app.emit(NOTICE_CHANNEL, notice);
         }
-        None => {}
+        None => drop(lease),
     }
 }
 
@@ -1652,6 +1725,17 @@ async fn shutdown_automation(
 
 /// 消费引擎事件：转发给前端，并在有货时发提醒。
 async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Event>) {
+    // 到货提醒交给单独的发送队列（移植自上游 v1.0.23）：Bark 服务器慢时要等满超时，
+    // 提示音也要等播完，原地等待会拖住事件循环，引擎往通道里发下一条事件时跟着被
+    // 卡住。队列只有一个消费者，提醒仍按到货顺序逐条发送。
+    let (alerts, mut queue) = tokio::sync::mpsc::unbounded_channel::<HitAlert>();
+    let sender_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        while let Some(alert) = queue.recv().await {
+            send_hit_alert(&sender_app, alert).await;
+        }
+    });
+
     while let Some(event) = events.recv().await {
         // 先原样转发。前端拿到的事件流应当与引擎发出的完全一致，
         // 中间少一层可能出错的翻译。
@@ -1674,7 +1758,8 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
             let mut opened_destination = None;
             let mut checkout_action = None;
             let hit_actions = checkout::hit_actions(&settings, target);
-            if settings.stop_on_hit {
+            // 开着自动结账时由结账结束后再决定暂停（见 finish_checkout），失败不截断重试。
+            if hit_actions.pause_monitoring {
                 // 放到独立任务里停：引擎可能正等着往这个事件通道里发下一条事件，
                 // 在这里原地等它停下会互相卡住。本轮已经发出的到货事件仍会照常处理。
                 let pause_app = app.clone();
@@ -1777,50 +1862,79 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
                 }
             }
 
-            if let Err(err) = dispatch_notification(&app, notification, &bark_url).await {
-                // 提醒没发出去是遗憾，但绝不能让监控本身停下来。
-                let _ = app.emit(NOTICE_CHANNEL, format!("发送提醒时出错：{err}"));
-            } else {
-                let mut actions = Vec::new();
-                if settings.sound_enabled {
-                    actions.push("提示音");
-                }
-                if !bark_url.trim().is_empty() {
-                    actions.push(if has_product_bark {
-                        "Bark（型号专属）"
-                    } else {
-                        "Bark"
-                    });
-                }
-                if hit_actions.add_to_bag {
-                    // 加购结果由后台任务单独报，这里只说一声已经开始。
-                    actions.push("自动加购受去重与结账保护约束");
-                }
-                if let Some(action) = checkout_action {
-                    actions.push(action);
-                }
-                if let Some(destination) = opened_destination {
-                    match destination {
-                        OpenOnHit::Bag => actions.push("已打开购物袋"),
-                        OpenOnHit::Product => actions.push("已打开商品页"),
-                        OpenOnHit::None => {}
-                    }
-                }
-                if actions.is_empty() {
-                    continue;
-                }
-                let _ = app.emit(
-                    NOTICE_CHANNEL,
-                    format!(
-                        "到货提醒已执行：{} {}（{}）",
-                        target.store_title,
-                        target.product_name,
-                        actions.join("、")
-                    ),
-                );
+            let mut actions = Vec::new();
+            if hit_actions.add_to_bag {
+                // 加购结果由后台任务单独报，这里只说一声已经开始。
+                actions.push("自动加购受去重与结账保护约束");
             }
+            if let Some(action) = checkout_action {
+                actions.push(action);
+            }
+            let _ = alerts.send(HitAlert {
+                notification,
+                bark_url,
+                has_product_bark,
+                sound_enabled: settings.sound_enabled,
+                automation: actions,
+                opened_destination,
+                store_title: target.store_title.clone(),
+                product_name: target.product_name.clone(),
+            });
         }
     }
+}
+
+/// 一次到货提醒要发送的内容，以及发送成功后写进活动日志的说明。
+struct HitAlert {
+    notification: Notification,
+    bark_url: String,
+    has_product_bark: bool,
+    sound_enabled: bool,
+    /// 自动加购/结账的派发说明（在事件循环里已经决定好，这里只负责写日志）。
+    automation: Vec<&'static str>,
+    opened_destination: Option<OpenOnHit>,
+    store_title: String,
+    product_name: String,
+}
+
+/// 发送一次到货提醒，并把结果写进活动日志。
+async fn send_hit_alert(app: &AppHandle, alert: HitAlert) {
+    if let Err(err) = dispatch_notification(app, alert.notification, &alert.bark_url).await {
+        // 提醒没发出去是遗憾，但绝不能让监控本身停下来。
+        let _ = app.emit(NOTICE_CHANNEL, format!("发送提醒时出错：{err}"));
+        return;
+    }
+    let mut actions = Vec::new();
+    if alert.sound_enabled {
+        actions.push("提示音");
+    }
+    if !alert.bark_url.trim().is_empty() {
+        actions.push(if alert.has_product_bark {
+            "Bark（型号专属）"
+        } else {
+            "Bark"
+        });
+    }
+    actions.extend(alert.automation);
+    if let Some(destination) = alert.opened_destination {
+        match destination {
+            OpenOnHit::Bag => actions.push("已打开购物袋"),
+            OpenOnHit::Product => actions.push("已打开商品页"),
+            OpenOnHit::None => {}
+        }
+    }
+    if actions.is_empty() {
+        return;
+    }
+    let _ = app.emit(
+        NOTICE_CHANNEL,
+        format!(
+            "到货提醒已执行：{} {}（{}）",
+            alert.store_title,
+            alert.product_name,
+            actions.join("、")
+        ),
+    );
 }
 
 /// 建系统托盘。

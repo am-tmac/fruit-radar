@@ -34,6 +34,7 @@ import {
 } from "@/components/ActivityLog";
 import { describeUpdateProgress, updatePercent } from "@/lib/updateStatus";
 import { CollapsiblePanel } from "@/components/CollapsiblePanel";
+import { BarkPushSettings } from "@/components/BarkPushSettings";
 import { CheckoutSettings } from "@/components/CheckoutSettings";
 import { NetworkSettings } from "@/components/NetworkSettings";
 import { Combobox } from "@/components/Combobox";
@@ -1090,6 +1091,7 @@ export default function App() {
                           监控列表可为某个型号指定其他人的 Bark 地址。
                         </p>
                       </div>
+                      <BarkPushSettings options={ui.settings.barkOptions} />
                       <div className="setting-row mt-4">
                         <Label htmlFor="backoff-enabled">失败时保护退避（推荐）</Label>
                         <Switch id="backoff-enabled" aria-label="失败时保护退避" checked={ui.settings.backoffEnabled} onCheckedChange={(value) => void saveSettings({ backoffEnabled: value })} />
@@ -1176,7 +1178,7 @@ export default function App() {
                         </div>
                         <p className="px-0 py-2 text-[11px] leading-4 text-muted-foreground">
                           {ui.settings.stopOnHit
-                            ? "任意一条监控到有货后暂停监控；本轮的提醒、自动加购和自动结账照常完成，需要时再手动开始。"
+                            ? "普通监控到货后暂停；开着自动结账时，失败会继续监控重试，结账完成或需要确认订单结果后才暂停。本轮的提醒、自动加购和自动结账照常完成，需要时再手动开始。"
                             : "持续有货时，每一轮都会重新提醒；开启了自动结账且上一次没有成功时，也会再次尝试。"}
                         </p>
 

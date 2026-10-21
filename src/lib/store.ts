@@ -83,6 +83,12 @@ const DEFAULT_SETTINGS: Settings = {
   intervalSeconds: 30,
   barkUrl: "",
   productBarkUrls: {},
+  barkOptions: {
+    level: "default",
+    sound: "",
+    volume: null,
+    call: false,
+  },
   soundEnabled: true,
   openOnHit: "product",
   network: {
@@ -107,6 +113,8 @@ const DEFAULT_SETTINGS: Settings = {
   stopOnHit: false,
   checkout: {
     enabled: false,
+    disableAfterSuccess: true,
+    autoAddToBag: false,
     payment: "alipay",
     installmentBank: "招商银行",
     installmentPeriods: 24,
